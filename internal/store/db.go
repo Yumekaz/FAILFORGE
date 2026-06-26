@@ -21,6 +21,10 @@ func NewStore(dbPath string) (*Store, error) {
 		return nil, fmt.Errorf("failed to open sqlite database: %w", err)
 	}
 
+	// Set busy timeout and enable WAL journal mode for concurrent-safe execution
+	_, _ = db.Exec("PRAGMA busy_timeout = 5000;")
+	_, _ = db.Exec("PRAGMA journal_mode = WAL;")
+
 	s := &Store{db: db}
 	if err := s.migrate(); err != nil {
 		db.Close()

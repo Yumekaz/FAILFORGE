@@ -34,7 +34,7 @@ var runCmd = &cobra.Command{
 			overrideSeed = &seedFlag
 		}
 
-		rn, err := runner.NewRunner(cfg, overrideSeed)
+		rn, err := runner.NewRunner(cfg, overrideSeed, "")
 		if err != nil {
 			return fmt.Errorf("failed to initialize runner: %w", err)
 		}

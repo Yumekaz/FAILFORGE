@@ -2,11 +2,13 @@ package cli
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"failforge/internal/model"
 	"failforge/internal/store"
 
 	"github.com/spf13/cobra"
@@ -124,6 +126,17 @@ func generateReport(st *store.Store, dbPath string, runDir string) error {
 		return fmt.Errorf("failed to fetch violations: %w", err)
 	}
 
+	// 6. Fetch Timeline Events
+	events, err := st.GetEvents(runID)
+	if err != nil {
+		return fmt.Errorf("failed to fetch timeline events: %w", err)
+	}
+
+	absRunDir, errAbs := filepath.Abs(runDir)
+	if errAbs != nil {
+		absRunDir = runDir
+	}
+
 	// Build Markdown Report
 	var sb strings.Builder
 	sb.WriteString("# FailForge Simulation Run Report\n\n")
@@ -184,10 +197,33 @@ func generateReport(st *store.Store, dbPath string, runDir string) error {
 		sb.WriteString("\n")
 	}
 
+	// Chronological Event Timeline
+	sb.WriteString("## Chronological Timeline of Events\n\n")
+	if len(events) == 0 {
+		sb.WriteString("No timeline events logged.\n\n")
+	} else {
+		for _, e := range events {
+			desc := formatEventDescription(e)
+			sb.WriteString(fmt.Sprintf("- `[%dms]` %s\n", e.TimeMs, desc))
+		}
+		sb.WriteString("\n")
+	}
+
 	// Replay Instructions
-	sb.WriteString("## Replay Campaign Instructions\n")
-	sb.WriteString("To reproduce this exact execution timeline, execute the run command with the seed:\n")
-	sb.WriteString(fmt.Sprintf("```bash\nfailforge run failforge.yml --seed %d\n```\n", seed))
+	sb.WriteString("## Replay Campaign Instructions\n\n")
+	sb.WriteString("To reproduce this exact execution timeline, execute the replay command:\n")
+	sb.WriteString(fmt.Sprintf("```bash\nfailforge replay %s\n```\n\n", runDir))
+
+	// Relevant Logs and Artifacts
+	sb.WriteString("## Relevant Logs and Artifacts\n\n")
+	sb.WriteString(fmt.Sprintf("- **SQLite Database**: [history.sqlite](file://%s/history.sqlite)\n", filepath.ToSlash(absRunDir)))
+	sb.WriteString(fmt.Sprintf("- **JSONL Event Stream**: [events.jsonl](file://%s/events.jsonl)\n", filepath.ToSlash(absRunDir)))
+	sb.WriteString(fmt.Sprintf("- **Fault Schedule**: [faults.json](file://%s/faults.json)\n", filepath.ToSlash(absRunDir)))
+	sb.WriteString("- **Node Logs**:\n")
+	for _, n := range nodes {
+		sb.WriteString(fmt.Sprintf("  - Node %s log: [%s.log](file://%s/logs/%s.log)\n", n.NodeID, n.NodeID, filepath.ToSlash(absRunDir), n.NodeID))
+	}
+	sb.WriteString("\n")
 
 	reportPath := filepath.Join(runDir, "report.md")
 	if err := os.WriteFile(reportPath, []byte(sb.String()), 0644); err != nil {
@@ -209,6 +245,53 @@ func generateReport(st *store.Store, dbPath string, runDir string) error {
 	}
 
 	return nil
+}
+
+func formatEventDescription(e *model.Event) string {
+	var payload map[string]interface{}
+	_ = json.Unmarshal([]byte(e.PayloadJSON), &payload)
+
+	switch e.Category {
+	case "Run":
+		if e.Type == "Violation" {
+			desc, _ := payload["description"].(string)
+			return fmt.Sprintf("⚠️ **Invariant Violation** (%s): %s", payload["checker_name"], desc)
+		}
+		return fmt.Sprintf("**Run Status**: %s", e.Type)
+	case "Node":
+		nodeID, _ := payload["node_id"].(string)
+		if nodeID == "" {
+			nodeID = e.Type
+		}
+		details := ""
+		if pid, ok := payload["pid"]; ok {
+			details = fmt.Sprintf(" (PID: %v, Port: %v)", pid, payload["port"])
+		}
+		return fmt.Sprintf("🖥️ **Node %s**: %s%s", nodeID, e.Type, details)
+	case "Fault":
+		nodeID, _ := payload["node"].(string)
+		nodeStr := ""
+		if nodeID != "" {
+			nodeStr = fmt.Sprintf(" on node %s", nodeID)
+		}
+		return fmt.Sprintf("💥 **Fault Injected**: %s%s - Payload: `%s`", e.Type, nodeStr, e.PayloadJSON)
+	case "Operation":
+		opID, _ := payload["op_id"].(string)
+		clientID, _ := payload["client_id"].(string)
+		op, _ := payload["op"].(string)
+		key, _ := payload["key"].(string)
+		if e.Type == "OperationInvoked" {
+			target, _ := payload["target"].(string)
+			return fmt.Sprintf("📥 **%s** by %s: %s key '%s' targeting %s (ID: %s)", strings.ToUpper(e.Type), clientID, strings.ToUpper(op), key, target, opID)
+		} else if e.Type == "OperationCompleted" {
+			status, _ := payload["status"].(string)
+			latency, _ := payload["latency_ms"].(float64)
+			return fmt.Sprintf("📤 **%s** by %s: %s -> %s (latency: %gms, ID: %s)", strings.ToUpper(e.Type), clientID, strings.ToUpper(op), status, latency, opID)
+		}
+		return fmt.Sprintf("⚙️ **Operation %s**: %s", e.Type, e.PayloadJSON)
+	default:
+		return fmt.Sprintf("**%s**: %s", e.Type, e.PayloadJSON)
+	}
 }
 
 func init() {

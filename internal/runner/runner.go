@@ -34,7 +34,7 @@ type Runner struct {
 	scheduler *faults.Scheduler
 }
 
-func NewRunner(cfg *config.Config, overrideSeed *int64) (*Runner, error) {
+func NewRunner(cfg *config.Config, overrideSeed *int64, overrideOutputDir string) (*Runner, error) {
 	// 1. Determine run ID and seed
 	runID := fmt.Sprintf("run-%d", time.Now().UnixNano())
 	
@@ -47,13 +47,18 @@ func NewRunner(cfg *config.Config, overrideSeed *int64) (*Runner, error) {
 	}
 
 	// 2. Determine output directory
-	r := strings.NewReplacer(
-		"{seed}", fmt.Sprintf("%d", seed),
-		"{run_id}", runID,
-	)
-	outputDir := r.Replace(cfg.Output.Dir)
-	if outputDir == "" {
-		outputDir = filepath.Join("runs", fmt.Sprintf("%d", seed))
+	var outputDir string
+	if overrideOutputDir != "" {
+		outputDir = overrideOutputDir
+	} else {
+		r := strings.NewReplacer(
+			"{seed}", fmt.Sprintf("%d", seed),
+			"{run_id}", runID,
+		)
+		outputDir = r.Replace(cfg.Output.Dir)
+		if outputDir == "" {
+			outputDir = filepath.Join("runs", fmt.Sprintf("%d", seed))
+		}
 	}
 
 	// Make sure output dir exists
@@ -61,8 +66,10 @@ func NewRunner(cfg *config.Config, overrideSeed *int64) (*Runner, error) {
 		return nil, fmt.Errorf("failed to create output directory: %w", err)
 	}
 
-	// Save a copy of the config inside the run directory
-	configBytes, err := json.MarshalIndent(cfg, "", "  ")
+	// Save a copy of the config inside the run directory with the actual seed set
+	cfgCopy := *cfg
+	cfgCopy.Seed = seed
+	configBytes, err := json.MarshalIndent(&cfgCopy, "", "  ")
 	if err == nil {
 		_ = os.WriteFile(filepath.Join(outputDir, "config.json"), configBytes, 0644)
 	}
