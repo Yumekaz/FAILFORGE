@@ -19,6 +19,7 @@ import (
 	"failforge/internal/proxy"
 	"failforge/internal/store"
 	"failforge/internal/workload"
+	"failforge/internal/checkers"
 )
 
 type Runner struct {
@@ -234,6 +235,51 @@ func (r *Runner) cleanup(runRecord *model.Run, finalStatus string) {
 	}
 	if r.proxy != nil {
 		_ = r.proxy.Stop()
+	}
+
+	// Run checkers if the run was successful up to this point
+	var violationsFound bool
+	if finalStatus == "PASSED" && len(r.cfg.Checkers) > 0 {
+		log.Println("[Runner] Running consistency and correctness invariant checkers...")
+		for _, chkCfg := range r.cfg.Checkers {
+			chk, err := checkers.GetChecker(chkCfg.Name)
+			if err != nil {
+				log.Printf("[Runner] Error getting checker '%s': %v\n", chkCfg.Name, err)
+				continue
+			}
+
+			violations, err := chk.Check(r.runID, r.store)
+			if err != nil {
+				log.Printf("[Runner] Checker '%s' failed: %v\n", chkCfg.Name, err)
+				continue
+			}
+
+			if len(violations) > 0 {
+				violationsFound = true
+				log.Printf("[Runner] Checker '%s' detected %d violation(s):\n", chkCfg.Name, len(violations))
+				for _, v := range violations {
+					log.Printf("  - %s: %s\n", v.Severity, v.Description)
+					violationRecord := v
+					if err := r.store.CreateViolation(&violationRecord); err != nil {
+						log.Printf("[Runner] Failed to save violation to DB: %v\n", err)
+					}
+
+					// Log Violation event to SQLite and events.jsonl
+					payloadMap := map[string]interface{}{
+						"checker_name":  v.CheckerName,
+						"severity":      v.Severity,
+						"description":   v.Description,
+						"evidence_json": v.EvidenceJSON,
+					}
+					payloadBytes, _ := json.Marshal(payloadMap)
+					r.logEvent(time.Since(runRecord.StartedAt).Milliseconds(), "Run", "Violation", string(payloadBytes))
+				}
+			}
+		}
+	}
+
+	if violationsFound {
+		finalStatus = "FAILED"
 	}
 
 	// Update run record in DB
