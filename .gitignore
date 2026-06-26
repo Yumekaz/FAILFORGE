@@ -1,1 +1,8 @@
 failforge_full_brief.md
+/failforge
+*.sqlite
+*.sqlite-journal
+runs/
+dist/
+bin/
+.failforge/

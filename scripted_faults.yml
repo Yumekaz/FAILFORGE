@@ -1,0 +1,47 @@
+name: scripted-faults-test
+seed: 99
+
+time:
+  duration_ms: 10000
+  tick_ms: 10
+
+system:
+  type: process_cluster
+  nodes:
+    count: 3
+    command: "python3 node.py --id {node_id} --port {port} --proxy {proxy_url}"
+    ports:
+      start: 7000
+    data_dir: ".failforge/data/{run_id}/{node_id}"
+
+network:
+  mode: controlled_proxy
+  proxy_port: 9000
+
+workload:
+  type: kv-register
+  clients: 2
+  duration_ms: 8000
+  keys: [x]
+  operations:
+    put:
+      weight: 5
+    get:
+      weight: 5
+
+faults:
+  mode: scripted
+  schedule:
+    - at_ms: 2000
+      type: partition
+      groups:
+        - [node-1, node-2, client]
+        - [node-3]
+    - at_ms: 5000
+      type: kill_node
+      node: node-2
+    - at_ms: 7000
+      type: heal
+
+output:
+  dir: "runs/{seed}"
