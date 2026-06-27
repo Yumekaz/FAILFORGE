@@ -125,19 +125,19 @@ func (c *LockExclusivityChecker) Check(runID string, st *store.Store) ([]model.V
 				if overlapStart < overlapEnd {
 					// Exclusivity violation found
 					evidenceMap := map[string]interface{}{
-						"key":            key,
-						"client1":        intI.clientID,
-						"lock1_op_id":    intI.lockOpID,
-						"unlock1_op_id":  intI.unlockOpID,
-						"start1":         intI.startMs,
-						"end1":           intI.endMs,
-						"client2":        intJ.clientID,
-						"lock2_op_id":    intJ.lockOpID,
-						"unlock2_op_id":  intJ.unlockOpID,
-						"start2":         intJ.startMs,
-						"end2":           intJ.endMs,
-						"overlap_start":  overlapStart,
-						"overlap_end":    overlapEnd,
+						"key":           key,
+						"client1":       intI.clientID,
+						"lock1_op_id":   intI.lockOpID,
+						"unlock1_op_id": intI.unlockOpID,
+						"start1":        intI.startMs,
+						"end1":          intI.endMs,
+						"client2":       intJ.clientID,
+						"lock2_op_id":   intJ.lockOpID,
+						"unlock2_op_id": intJ.unlockOpID,
+						"start2":        intJ.startMs,
+						"end2":          intJ.endMs,
+						"overlap_start": overlapStart,
+						"overlap_end":   overlapEnd,
 					}
 					evidenceBytes, _ := json.Marshal(evidenceMap)
 

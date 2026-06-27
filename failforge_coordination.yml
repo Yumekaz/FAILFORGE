@@ -1,0 +1,53 @@
+# FailForge test configuration for Coordination-service
+name: coordination-service-test
+seed: 42
+
+time:
+  duration_ms: 10000
+  tick_ms: 10
+
+system:
+  type: process_cluster
+  nodes:
+    count: 3
+    command: "COORD_PORT={port} COORD_NODE_ID={node_id} COORD_DB_PATH=.failforge/data/{run_id}/{node_id}.db COORD_PEER_URLS=http://localhost:9000/node-1,http://localhost:9000/node-2,http://localhost:9000/node-3 COORD_ADVERTISE_URL=http://localhost:9000/{node_id} COORD_REQUIRE_WRITE_QUORUM=true COORD_CLUSTER_ROLE=follower COORD_ELECTION_TIMEOUT=1.5 COORD_HEARTBEAT_INTERVAL=0.3 python3 /home/yumekaz/Desktop/Coordination-service/main.py"
+    ports:
+      start: 8000
+    data_dir: ".failforge/data/{run_id}/{node_id}"
+
+network:
+  mode: controlled_proxy
+  proxy_port: 9000
+
+workload:
+  type: coordination-service
+  clients: 3
+  duration_ms: 8000
+  keys: [lock-a, lock-b, data-x]
+  operations:
+    lock:
+      weight: 3
+    unlock:
+      weight: 3
+    put:
+      weight: 2
+    get:
+      weight: 2
+
+faults:
+  mode: seeded_random
+  profile:
+    max_faults: 3
+    kill_node:
+      weight: 1
+    restart_node:
+      weight: 1
+    partition:
+      weight: 2
+
+checkers:
+  - name: lock_exclusivity
+  - name: no_two_leaders
+
+output:
+  dir: "runs/coordination-{seed}"

@@ -41,13 +41,13 @@ type NodeProcess struct {
 }
 
 type NodeManager struct {
-	mu         sync.RWMutex
-	cfg        *config.Config
-	runID      string
-	nodes      map[string]*NodeProcess
-	onEvent    EventCallback
-	runsDir    string
-	startTime  time.Time
+	mu        sync.RWMutex
+	cfg       *config.Config
+	runID     string
+	nodes     map[string]*NodeProcess
+	onEvent   EventCallback
+	runsDir   string
+	startTime time.Time
 }
 
 func NewNodeManager(cfg *config.Config, runID string, runsDir string, onEvent EventCallback) *NodeManager {
@@ -139,11 +139,11 @@ func (nm *NodeManager) startNodeUnlocked(ctx context.Context, np *NodeProcess, t
 
 	nodeCtx, cancel := context.WithCancel(ctx)
 	cmd := exec.CommandContext(nodeCtx, "/bin/sh", "-c", np.CmdStr)
-	
+
 	// Create a pipe for stderr to redirect it to the same file
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
-	
+
 	// Set pgid so we can kill subprocess trees if needed
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
@@ -207,7 +207,7 @@ func (nm *NodeManager) stopNodeUnlocked(np *NodeProcess) {
 		if np.Cmd != nil && np.Cmd.Process != nil {
 			// Kill the process group to clean up subprocesses
 			syscall.Kill(-np.Cmd.Process.Pid, syscall.SIGTERM)
-			
+
 			// Wait a bit for graceful stop, otherwise kill
 			time.AfterFunc(1*time.Second, func() {
 				if np.Cmd != nil && np.Cmd.Process != nil {

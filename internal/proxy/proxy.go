@@ -3,6 +3,7 @@ package proxy
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -182,7 +183,29 @@ func (p *Proxy) getDelay(from, to string) time.Duration {
 	return p.delayRules[from][to]
 }
 
+func (p *Proxy) IsBlocked(from, to string) bool {
+	return p.isPartitioned(from, to) || p.isDropped(from, to)
+}
+
+func (p *Proxy) GetDelay(from, to string) time.Duration {
+	return p.getDelay(from, to)
+}
+
 func (p *Proxy) handleProxy(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/failforge/check" {
+		from := r.URL.Query().Get("from")
+		to := r.URL.Query().Get("to")
+		blocked := p.IsBlocked(from, to)
+		delay := p.GetDelay(from, to)
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"blocked":  blocked,
+			"delay_ms": delay.Milliseconds(),
+		})
+		return
+	}
+
 	fromNode := r.Header.Get("X-FailForge-From")
 	if fromNode == "" {
 		fromNode = "client"
@@ -268,13 +291,13 @@ func (p *Proxy) handleProxy(w http.ResponseWriter, r *http.Request) {
 			`{"message_id":"%s","from":"%s","to":"%s","delay_ms":%d}`,
 			msgID, fromNode, toNode, delay.Milliseconds(),
 		))
-		
+
 		select {
 		case <-r.Context().Done():
 			return
 		case <-time.After(delay):
 		}
-		
+
 		sendMs = p.getElapsedTimeMs()
 	}
 
@@ -296,7 +319,7 @@ func (p *Proxy) handleProxy(w http.ResponseWriter, r *http.Request) {
 	))
 
 	reverseProxy := httputil.NewSingleHostReverseProxy(destURL)
-	
+
 	// Customize Director to adjust paths and headers
 	originalDirector := reverseProxy.Director
 	reverseProxy.Director = func(req *http.Request) {
@@ -329,7 +352,7 @@ func (p *Proxy) handleProxy(w http.ResponseWriter, r *http.Request) {
 	reverseProxy.ErrorHandler = func(w http.ResponseWriter, req *http.Request, err error) {
 		deliverMs := p.getElapsedTimeMs()
 		log.Printf("[Proxy] Failed to forward from %s to %s: %v\n", fromNode, toNode, err)
-		
+
 		_ = p.store.UpdateMessage(&model.Message{
 			MessageID: msgID,
 			RunID:     p.runID,

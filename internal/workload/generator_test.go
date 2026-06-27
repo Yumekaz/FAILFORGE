@@ -41,13 +41,13 @@ func TestWorkloadGeneratorDeterminismAndExecution(t *testing.T) {
 		mu.Lock()
 		defer mu.Unlock()
 		receivedOps = append(receivedOps, r.Method)
-		
+
 		// Extract key from path (e.g. /keys/x)
 		parts := strings.Split(r.URL.Path, "/")
 		if len(parts) > 0 {
 			receivedKeys = append(receivedKeys, parts[len(parts)-1])
 		}
-		
+
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("ok"))
 	}))

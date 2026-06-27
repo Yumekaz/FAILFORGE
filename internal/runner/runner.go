@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"failforge/internal/checkers"
 	"failforge/internal/config"
 	"failforge/internal/faults"
 	"failforge/internal/model"
@@ -19,7 +20,6 @@ import (
 	"failforge/internal/proxy"
 	"failforge/internal/store"
 	"failforge/internal/workload"
-	"failforge/internal/checkers"
 )
 
 type Runner struct {
@@ -37,7 +37,7 @@ type Runner struct {
 func NewRunner(cfg *config.Config, overrideSeed *int64, overrideOutputDir string) (*Runner, error) {
 	// 1. Determine run ID and seed
 	runID := fmt.Sprintf("run-%d", time.Now().UnixNano())
-	
+
 	seed := cfg.Seed
 	if overrideSeed != nil {
 		seed = *overrideSeed
@@ -202,6 +202,8 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 
 	wlGen := workload.NewGenerator(r.cfg, r.runID, r.seed, r.store, r.logEvent)
+	wlGen.IsBlocked = r.proxy.IsBlocked
+	wlGen.GetDelay = r.proxy.GetDelay
 	wlCtx, wlCancel := context.WithTimeout(ctx, duration)
 	defer wlCancel()
 

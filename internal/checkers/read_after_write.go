@@ -84,10 +84,10 @@ func (c *ReadAfterWriteChecker) Check(runID string, st *store.Store) ([]model.Vi
 			if getVal != "null" && getVal != "" {
 				if _, exists := valueIdx[getVal]; !exists {
 					violations = append(violations, model.Violation{
-						RunID:       runID,
-						CheckerName: c.Name(),
-						Severity:    "ERROR",
-						Description: fmt.Sprintf("Corrupt read on key '%s': GET returned value '%s' which was never successfully written", key, getVal),
+						RunID:        runID,
+						CheckerName:  c.Name(),
+						Severity:     "ERROR",
+						Description:  fmt.Sprintf("Corrupt read on key '%s': GET returned value '%s' which was never successfully written", key, getVal),
 						EvidenceJSON: fmt.Sprintf(`{"get_op_id":"%s","actual_value":"%s"}`, get.OpID, getVal),
 					})
 					continue

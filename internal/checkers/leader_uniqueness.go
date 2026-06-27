@@ -24,8 +24,8 @@ func (c *LeaderUniquenessChecker) Check(runID string, st *store.Store) ([]model.
 
 	var violations []model.Violation
 
-	termLeaders := make(map[int]string)        // term -> node_id
-	activeLeaders := make(map[string]int64)     // node_id -> start_time_ms
+	termLeaders := make(map[int]string)     // term -> node_id
+	activeLeaders := make(map[string]int64) // node_id -> start_time_ms
 
 	for _, e := range events {
 		eventType := e.Type

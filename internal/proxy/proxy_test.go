@@ -82,7 +82,7 @@ func TestProxyForwardingAndPartitions(t *testing.T) {
 			PayloadJSON: payloadJSON,
 		})
 	})
-	
+
 	// Start proxy on a dynamically allocated port using a test server handler wrapper
 	proxyMux := http.NewServeMux()
 	proxyMux.HandleFunc("/", p.handleProxy)
