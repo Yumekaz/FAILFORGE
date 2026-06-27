@@ -48,6 +48,7 @@ type NodeManager struct {
 	onEvent   EventCallback
 	runsDir   string
 	startTime time.Time
+	wg        sync.WaitGroup
 }
 
 func NewNodeManager(cfg *config.Config, runID string, runsDir string, onEvent EventCallback) *NodeManager {
@@ -109,14 +110,15 @@ func (nm *NodeManager) StartAll(ctx context.Context) error {
 	return nil
 }
 
-// StopAll stops all node processes.
+// StopAll stops all node processes and waits for them to exit.
 func (nm *NodeManager) StopAll() error {
 	nm.mu.Lock()
-	defer nm.mu.Unlock()
-
 	for _, np := range nm.nodes {
 		nm.stopNodeUnlocked(np)
 	}
+	nm.mu.Unlock()
+
+	nm.wg.Wait()
 	return nil
 }
 
@@ -126,7 +128,12 @@ func (nm *NodeManager) startNodeUnlocked(ctx context.Context, np *NodeProcess, t
 		return fmt.Errorf("failed to create data dir: %w", err)
 	}
 
-	logDir := filepath.Join(nm.runsDir, nm.runID, "logs")
+	var logDir string
+	if nm.runsDir == "runs" {
+		logDir = filepath.Join(nm.runsDir, nm.runID, "logs")
+	} else {
+		logDir = filepath.Join(nm.runsDir, "logs")
+	}
 	if err := os.MkdirAll(logDir, 0755); err != nil {
 		return fmt.Errorf("failed to create log dir: %w", err)
 	}
@@ -166,12 +173,14 @@ func (nm *NodeManager) startNodeUnlocked(ctx context.Context, np *NodeProcess, t
 	})
 
 	// Monitor process completion in the background
+	nm.wg.Add(1)
 	go nm.monitorProcess(np)
 
 	return nil
 }
 
 func (nm *NodeManager) monitorProcess(np *NodeProcess) {
+	defer nm.wg.Done()
 	err := np.Cmd.Wait()
 
 	nm.mu.Lock()

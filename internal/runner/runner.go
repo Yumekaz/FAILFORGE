@@ -152,7 +152,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	))
 
 	// 2. Initialize Node Manager
-	r.manager = node.NewNodeManager(r.cfg, r.runID, "runs", r.handleNodeEvent)
+	r.manager = node.NewNodeManager(r.cfg, r.runID, r.outputDir, r.handleNodeEvent)
 
 	// Pre-create node entries in SQLite
 	count := r.cfg.System.Nodes.Count
@@ -390,4 +390,51 @@ func (r *Runner) logEvent(timeMs int64, category, eventType, payloadJSON string)
 			_, _ = r.jsonlFile.Write(append(b, '\n'))
 		}
 	}
+}
+
+type RunResult struct {
+	RunID          string
+	Status         string
+	ViolationCount int
+	OutputDir      string
+}
+
+func (r *Runner) RunAndReport(ctx context.Context) (*RunResult, error) {
+	err := r.Run(ctx)
+	
+	// Close store to release locks so other processes or the campaign manager can read it.
+	r.store.Close()
+
+	// Re-open store to retrieve results
+	dbPath := filepath.Join(r.outputDir, "history.sqlite")
+	st, storeErr := store.NewStore(dbPath)
+	if storeErr != nil {
+		return &RunResult{
+			RunID:     r.runID,
+			Status:    "CRASHED",
+			OutputDir: r.outputDir,
+		}, fmt.Errorf("failed to re-open store to read results: %w", storeErr)
+	}
+	defer st.Close()
+
+	runRec, getErr := st.GetRun(r.runID)
+	status := "UNKNOWN"
+	if getErr == nil && runRec != nil {
+		status = runRec.Status
+	}
+
+	viols, _ := st.GetViolations(r.runID)
+	violCount := 0
+	for _, v := range viols {
+		if strings.ToUpper(v.Severity) != "INFO" {
+			violCount++
+		}
+	}
+
+	return &RunResult{
+		RunID:          r.runID,
+		Status:         status,
+		ViolationCount: violCount,
+		OutputDir:      r.outputDir,
+	}, err
 }
