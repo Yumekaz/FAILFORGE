@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"failforge/internal/model"
+	"failforge/internal/runner"
 	"failforge/internal/store"
 
 	"github.com/spf13/cobra"
@@ -214,8 +215,12 @@ func generateReport(st *store.Store, dbPath string, runDir string) error {
 	sb.WriteString("To reproduce this exact execution timeline, execute the replay command:\n")
 	sb.WriteString(fmt.Sprintf("```bash\nfailforge replay %s\n```\n\n", runDir))
 
+	// Automatically generate visual HTML timeline
+	_ = runner.GenerateHTMLTimeline(runID, st, runDir)
+
 	// Relevant Logs and Artifacts
 	sb.WriteString("## Relevant Logs and Artifacts\n\n")
+	sb.WriteString(fmt.Sprintf("- **Interactive Visual Timeline**: [timeline.html](file://%s/timeline.html)\n", filepath.ToSlash(absRunDir)))
 	sb.WriteString(fmt.Sprintf("- **SQLite Database**: [history.sqlite](file://%s/history.sqlite)\n", filepath.ToSlash(absRunDir)))
 	sb.WriteString(fmt.Sprintf("- **JSONL Event Stream**: [events.jsonl](file://%s/events.jsonl)\n", filepath.ToSlash(absRunDir)))
 	sb.WriteString(fmt.Sprintf("- **Fault Schedule**: [faults.json](file://%s/faults.json)\n", filepath.ToSlash(absRunDir)))
