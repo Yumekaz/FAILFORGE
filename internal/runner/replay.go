@@ -62,6 +62,7 @@ func ReplayRun(ctx context.Context, runDir string) (*ReplayResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize replay runner: %w", err)
 	}
+	defer rn.store.Close()
 
 	// 6. Execute the Replay Campaign
 	if err := rn.Run(ctx); err != nil {
