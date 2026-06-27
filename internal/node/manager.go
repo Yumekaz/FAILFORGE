@@ -172,6 +172,9 @@ func (nm *NodeManager) startNodeUnlocked(ctx context.Context, np *NodeProcess, t
 		"data_dir": np.DataDir,
 	})
 
+	// Take a snapshot of the starting/restarting state
+	_, _ = nm.takeSnapshotUnlocked(np)
+
 	// Monitor process completion in the background
 	nm.wg.Add(1)
 	go nm.monitorProcess(np)
@@ -373,4 +376,124 @@ func (nm *NodeManager) GetPort(nodeID string) (int, error) {
 		return 0, fmt.Errorf("node %s not found", nodeID)
 	}
 	return np.Port, nil
+}
+
+func (nm *NodeManager) TakeSnapshot(nodeID string) (string, error) {
+	nm.mu.Lock()
+	defer nm.mu.Unlock()
+
+	np, ok := nm.nodes[nodeID]
+	if !ok {
+		return "", fmt.Errorf("node %s not found", nodeID)
+	}
+	return nm.takeSnapshotUnlocked(np)
+}
+
+func (nm *NodeManager) takeSnapshotUnlocked(np *NodeProcess) (string, error) {
+	// Create a unique timestamped path: runs/<runID>/snapshots/<nodeID>/<timestamp>
+	timestamp := time.Now().Format("20060102150405.000")
+	var snapshotDir string
+	if nm.runsDir == "runs" {
+		snapshotDir = filepath.Join(nm.runsDir, nm.runID, "snapshots", np.ID, timestamp)
+	} else {
+		snapshotDir = filepath.Join(nm.runsDir, "snapshots", np.ID, timestamp)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(snapshotDir), 0755); err != nil {
+		return "", err
+	}
+
+	if _, err := os.Stat(np.DataDir); os.IsNotExist(err) {
+		return "", nil
+	}
+
+	cmd := exec.Command("cp", "-a", np.DataDir, snapshotDir)
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("failed to copy data dir to snapshot: %w", err)
+	}
+
+	// Prune older snapshots if we exceed 3
+	parentDir := filepath.Dir(snapshotDir)
+	files, err := os.ReadDir(parentDir)
+	if err == nil {
+		var dirs []string
+		for _, f := range files {
+			if f.IsDir() {
+				dirs = append(dirs, f.Name())
+			}
+		}
+		if len(dirs) > 3 {
+			for i := 0; i < len(dirs)-3; i++ {
+				os.RemoveAll(filepath.Join(parentDir, dirs[i]))
+			}
+		}
+	}
+
+	return snapshotDir, nil
+}
+
+func (nm *NodeManager) RestoreSnapshot(nodeID string, snapshotPath string) error {
+	nm.mu.Lock()
+	defer nm.mu.Unlock()
+
+	np, ok := nm.nodes[nodeID]
+	if !ok {
+		return fmt.Errorf("node %s not found", nodeID)
+	}
+
+	if np.State == StateRunning || np.State == StatePaused {
+		return fmt.Errorf("cannot restore snapshot while node %s is active (state: %s)", nodeID, np.State)
+	}
+
+	// Delete current data dir contents
+	if err := os.RemoveAll(np.DataDir); err != nil {
+		return fmt.Errorf("failed to clear data dir: %w", err)
+	}
+
+	// Copy snapshotPath back to np.DataDir
+	cmd := exec.Command("cp", "-a", snapshotPath, np.DataDir)
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to restore snapshot: %w", err)
+	}
+
+	return nil
+}
+
+func (nm *NodeManager) ListSnapshots(nodeID string) ([]string, error) {
+	nm.mu.RLock()
+	defer nm.mu.RUnlock()
+
+	var parentDir string
+	if nm.runsDir == "runs" {
+		parentDir = filepath.Join(nm.runsDir, nm.runID, "snapshots", nodeID)
+	} else {
+		parentDir = filepath.Join(nm.runsDir, "snapshots", nodeID)
+	}
+
+	files, err := os.ReadDir(parentDir)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	var snapshots []string
+	for _, f := range files {
+		if f.IsDir() {
+			snapshots = append(snapshots, filepath.Join(parentDir, f.Name()))
+		}
+	}
+	return snapshots, nil
+}
+
+func (nm *NodeManager) GetDataDir(nodeID string) (string, error) {
+	nm.mu.RLock()
+	defer nm.mu.RUnlock()
+
+	np, ok := nm.nodes[nodeID]
+	if !ok {
+		return "", fmt.Errorf("node %s not found", nodeID)
+	}
+	return np.DataDir, nil
 }

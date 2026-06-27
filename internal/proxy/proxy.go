@@ -1,11 +1,14 @@
 package proxy
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	mrand "math/rand"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -32,8 +35,12 @@ type Proxy struct {
 	partitions   map[string]map[string]bool // fromNode -> toNode -> isBlocked
 	messageCount int
 	onEvent      func(timeMs int64, category, eventType, payloadJSON string)
-	dropRules    map[string]map[string]bool
-	delayRules   map[string]map[string]time.Duration
+	dropRules        map[string]map[string]bool
+	delayRules       map[string]map[string]time.Duration
+	duplicateRules   map[string]map[string]bool
+	corruptionRules  map[string]map[string]float64
+	asymmetricBlocks map[string]map[string]bool
+	clockOffsets     map[string]int64
 }
 
 func NewProxy(port int, runID string, resolver PortResolver, store *store.Store, onEvent func(timeMs int64, category, eventType, payloadJSON string)) *Proxy {
@@ -45,8 +52,12 @@ func NewProxy(port int, runID string, resolver PortResolver, store *store.Store,
 		startTime:  time.Now(),
 		partitions: make(map[string]map[string]bool),
 		onEvent:    onEvent,
-		dropRules:  make(map[string]map[string]bool),
-		delayRules: make(map[string]map[string]time.Duration),
+		dropRules:        make(map[string]map[string]bool),
+		delayRules:       make(map[string]map[string]time.Duration),
+		duplicateRules:   make(map[string]map[string]bool),
+		corruptionRules:  make(map[string]map[string]float64),
+		asymmetricBlocks: make(map[string]map[string]bool),
+		clockOffsets:     make(map[string]int64),
 	}
 }
 
@@ -183,8 +194,95 @@ func (p *Proxy) getDelay(from, to string) time.Duration {
 	return p.delayRules[from][to]
 }
 
+// SetDuplicateRule configures message duplication between a pair of nodes.
+func (p *Proxy) SetDuplicateRule(from, to string, active bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.duplicateRules[from] == nil {
+		p.duplicateRules[from] = make(map[string]bool)
+	}
+	p.duplicateRules[from][to] = active
+}
+
+func (p *Proxy) isDuplicated(from, to string) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	if p.duplicateRules[from] == nil {
+		return false
+	}
+	return p.duplicateRules[from][to]
+}
+
+// SetCorruptionRule configures packet corruption rate between a pair of nodes.
+func (p *Proxy) SetCorruptionRule(from, to string, rate float64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.corruptionRules[from] == nil {
+		p.corruptionRules[from] = make(map[string]float64)
+	}
+	p.corruptionRules[from][to] = rate
+}
+
+func (p *Proxy) getCorruptionRate(from, to string) float64 {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	if p.corruptionRules[from] == nil {
+		return 0
+	}
+	return p.corruptionRules[from][to]
+}
+
+// SetAsymmetricBlock configures one-way blocking from node A to node B.
+func (p *Proxy) SetAsymmetricBlock(from, to string, blocked bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.asymmetricBlocks[from] == nil {
+		p.asymmetricBlocks[from] = make(map[string]bool)
+	}
+	p.asymmetricBlocks[from][to] = blocked
+}
+
+func (p *Proxy) isAsymmetricBlocked(from, to string) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	if p.asymmetricBlocks[from] == nil {
+		return false
+	}
+	return p.asymmetricBlocks[from][to]
+}
+
+// SetClockOffset configures a virtual clock offset for a specific node in milliseconds.
+func (p *Proxy) SetClockOffset(nodeID string, offsetMs int64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.clockOffsets[nodeID] = offsetMs
+}
+
+func (p *Proxy) getClockOffset(nodeID string) int64 {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.clockOffsets[nodeID]
+}
+
+// ClearAdvancedFaultRules clears all message duplication, corruption, asymmetric blocks, and clock offsets.
+func (p *Proxy) ClearAdvancedFaultRules() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.duplicateRules = make(map[string]map[string]bool)
+	p.corruptionRules = make(map[string]map[string]float64)
+	p.asymmetricBlocks = make(map[string]map[string]bool)
+	p.clockOffsets = make(map[string]int64)
+}
+
 func (p *Proxy) IsBlocked(from, to string) bool {
-	return p.isPartitioned(from, to) || p.isDropped(from, to)
+	return p.isPartitioned(from, to) || p.isDropped(from, to) || p.isAsymmetricBlocked(from, to)
 }
 
 func (p *Proxy) GetDelay(from, to string) time.Duration {
@@ -241,11 +339,13 @@ func (p *Proxy) handleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 3. Check for active network partition or drop rule
-	isBlocked := p.isPartitioned(fromNode, toNode) || p.isDropped(fromNode, toNode)
+	// 3. Check for active network partition or drop rule or asymmetric block
+	isBlocked := p.isPartitioned(fromNode, toNode) || p.isDropped(fromNode, toNode) || p.isAsymmetricBlocked(fromNode, toNode)
 	reason := "partition"
 	if p.isDropped(fromNode, toNode) {
 		reason = "drop_rule"
+	} else if p.isAsymmetricBlocked(fromNode, toNode) {
+		reason = "asymmetric_partition"
 	}
 
 	if isBlocked {
@@ -278,6 +378,44 @@ func (p *Proxy) handleProxy(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, "Internal Server Error: failed to parse destination URL", http.StatusInternalServerError)
 		return
+	}
+
+	// Check for duplication and duplicate request flags
+	isDuplicated := p.isDuplicated(fromNode, toNode)
+	isDuplicateRequest := r.Header.Get("X-FailForge-Duplicate") == "true"
+
+	var bodyBytes []byte
+	if r.Body != nil && (isDuplicated && !isDuplicateRequest || p.getCorruptionRate(fromNode, toNode) > 0) {
+		var err error
+		bodyBytes, err = io.ReadAll(r.Body)
+		if err == nil {
+			r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+		}
+	}
+
+	// Packet corruption check
+	corruptionRate := p.getCorruptionRate(fromNode, toNode)
+	if corruptionRate > 0 && mrand.Float64() < corruptionRate && len(bodyBytes) > 0 {
+		corruptedBytes := make([]byte, len(bodyBytes))
+		copy(corruptedBytes, bodyBytes)
+
+		// Corrupt 1 to 3 random bytes
+		rng := mrand.New(mrand.NewSource(time.Now().UnixNano()))
+		numCorruptions := rng.Intn(3) + 1
+		if numCorruptions > len(corruptedBytes) {
+			numCorruptions = len(corruptedBytes)
+		}
+		for i := 0; i < numCorruptions; i++ {
+			pos := rng.Intn(len(corruptedBytes))
+			corruptedBytes[pos] ^= 0xFF // flip bits
+		}
+		r.Body = io.NopCloser(bytes.NewReader(corruptedBytes))
+
+		corruptTimeMs := p.getElapsedTimeMs()
+		p.onEvent(corruptTimeMs, "Message", "MessageCorrupted", fmt.Sprintf(
+			`{"from":"%s","to":"%s","bytes_corrupted":%d}`,
+			fromNode, toNode, numCorruptions,
+		))
 	}
 
 	msgID := p.generateMsgID()
@@ -330,6 +468,14 @@ func (p *Proxy) handleProxy(w http.ResponseWriter, r *http.Request) {
 		if toNodeHeader == "" && len(pathParts) > 0 && strings.HasPrefix(pathParts[0], "node-") {
 			req.URL.Path = "/" + strings.Join(pathParts[1:], "/")
 		}
+
+		// Inject clock offset header
+		p.mu.RLock()
+		offset := p.clockOffsets[toNode]
+		p.mu.RUnlock()
+		if offset != 0 {
+			req.Header.Set("X-FailForge-Clock-Offset", fmt.Sprintf("%d", offset))
+		}
 	}
 
 	// Handle successful delivery or failures
@@ -368,4 +514,31 @@ func (p *Proxy) handleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	reverseProxy.ServeHTTP(w, r)
+
+	// Trigger duplication after serving the main request
+	if isDuplicated && !isDuplicateRequest {
+		go func(body []byte, headers http.Header, method, path string) {
+			time.Sleep(10 * time.Millisecond) // separate the duplicate message slightly
+			proxyURL := fmt.Sprintf("http://localhost:%d%s", p.port, path)
+			req, err := http.NewRequest(method, proxyURL, bytes.NewReader(body))
+			if err != nil {
+				return
+			}
+			for k, vv := range headers {
+				for _, v := range vv {
+					req.Header.Add(k, v)
+				}
+			}
+			req.Header.Set("X-FailForge-Duplicate", "true")
+
+			origMsgType := req.Header.Get("X-FailForge-MsgType")
+			req.Header.Set("X-FailForge-MsgType", origMsgType+" (duplicate)")
+
+			client := &http.Client{Timeout: 5 * time.Second}
+			resp, err := client.Do(req)
+			if err == nil {
+				resp.Body.Close()
+			}
+		}(bodyBytes, r.Header.Clone(), r.Method, r.URL.Path)
+	}
 }

@@ -33,6 +33,7 @@ type Scheduler struct {
 	schedule   []config.FaultConfig
 	wg         sync.WaitGroup
 	cancelFunc context.CancelFunc
+	registry   *Registry
 }
 
 func NewScheduler(
@@ -44,7 +45,11 @@ func NewScheduler(
 	proxy *proxy.Proxy,
 	store *store.Store,
 	onEvent func(timeMs int64, category, eventType, payloadJSON string),
+	reg *Registry,
 ) *Scheduler {
+	if reg == nil {
+		reg = DefaultRegistry()
+	}
 	return &Scheduler{
 		cfg:       cfg,
 		runID:     runID,
@@ -54,6 +59,7 @@ func NewScheduler(
 		proxy:     proxy,
 		store:     store,
 		onEvent:   onEvent,
+		registry:  reg,
 	}
 }
 
@@ -155,30 +161,30 @@ func (s *Scheduler) injectFault(ctx context.Context, f config.FaultConfig) {
 
 	log.Printf("[Scheduler] [%dms] Injecting fault %s: %s\n", timeMs, f.Type, payloadJSON)
 
-	switch strings.ToLower(f.Type) {
-	case "kill_node":
-		if f.Node != "" {
-			_ = s.manager.KillNode(f.Node)
-		}
-	case "restart_node":
-		if f.Node != "" {
-			_ = s.manager.RestartNode(ctx, f.Node)
-		}
-	case "partition":
-		if len(f.Groups) > 0 {
-			s.proxy.SetPartition(f.Groups)
-		}
-	case "heal":
-		s.proxy.ClearPartitions()
-		s.proxy.ClearFaultRules()
-	case "delay_messages":
-		if f.From != "" && f.To != "" && f.DelayMs > 0 {
-			s.proxy.SetDelayRule(f.From, f.To, time.Duration(f.DelayMs)*time.Millisecond)
-		}
-	case "drop_messages":
-		if f.From != "" && f.To != "" {
-			s.proxy.SetDropRule(f.From, f.To, true)
-		}
+	fctx := &FaultContext{
+		Config:    &f,
+		Manager:   s.manager,
+		Proxy:     s.proxy,
+		Store:     s.store,
+		RunDir:    s.outputDir,
+		Seed:      s.seed,
+		LogEvent:  s.onEvent,
+		StartTime: s.startTime,
+	}
+
+	fault, ok := s.registry.Get(f.Type)
+	if !ok {
+		log.Printf("[Scheduler] Unknown fault type: %s\n", f.Type)
+		return
+	}
+
+	if err := fault.Validate(&f); err != nil {
+		log.Printf("[Scheduler] Validation failed for fault %s: %v\n", f.Type, err)
+		return
+	}
+
+	if err := fault.Inject(ctx, fctx); err != nil {
+		log.Printf("[Scheduler] Error injecting fault %s: %v\n", f.Type, err)
 	}
 }
 
@@ -242,12 +248,23 @@ func (s *Scheduler) generateRandomSchedule() []config.FaultConfig {
 
 	if totalWeight == 0 {
 		weights = []FaultTypeWeight{
-			{name: "kill_node", weight: 2},
-			{name: "restart_node", weight: 2},
-			{name: "partition", weight: 3},
-			{name: "heal", weight: 3},
+			{name: "kill_node", weight: 4},
+			{name: "restart_node", weight: 4},
+			{name: "partition", weight: 6},
+			{name: "heal", weight: 6},
+			{name: "delay_messages", weight: 3},
+			{name: "drop_messages", weight: 3},
+			{name: "asymmetric_partition", weight: 2},
+			{name: "duplicate_messages", weight: 2},
+			{name: "corrupt_messages", weight: 2},
+			{name: "cpu_pause", weight: 3},
+			{name: "slow_disk", weight: 2},
+			{name: "disk_write_loss", weight: 2},
+			{name: "partial_persistence", weight: 2},
+			{name: "stale_snapshot_restart", weight: 2},
+			{name: "clock_skew", weight: 2},
 		}
-		totalWeight = 10
+		totalWeight = 45
 	}
 
 	durationMs := int64(s.cfg.Time.DurationMs)
@@ -339,6 +356,79 @@ func (s *Scheduler) generateRandomSchedule() []config.FaultConfig {
 		case "drop_messages":
 			fault.From = "client"
 			fault.To = randomNode
+		case "asymmetric_partition":
+			nodeSrc := fmt.Sprintf("node-%d", r.Intn(nodeCount)+1)
+			nodeDest := fmt.Sprintf("node-%d", r.Intn(nodeCount)+1)
+			for nodeSrc == nodeDest {
+				nodeDest = fmt.Sprintf("node-%d", r.Intn(nodeCount)+1)
+			}
+			fault.Params = map[string]interface{}{
+				"from": nodeSrc,
+				"to":   nodeDest,
+			}
+			activePartitions = true
+		case "duplicate_messages":
+			nodeSrc := "client"
+			if r.Intn(2) == 0 {
+				nodeSrc = fmt.Sprintf("node-%d", r.Intn(nodeCount)+1)
+			}
+			nodeDest := fmt.Sprintf("node-%d", r.Intn(nodeCount)+1)
+			for nodeSrc == nodeDest {
+				nodeDest = fmt.Sprintf("node-%d", r.Intn(nodeCount)+1)
+			}
+			fault.Params = map[string]interface{}{
+				"from": nodeSrc,
+				"to":   nodeDest,
+			}
+		case "corrupt_messages":
+			nodeSrc := "client"
+			if r.Intn(2) == 0 {
+				nodeSrc = fmt.Sprintf("node-%d", r.Intn(nodeCount)+1)
+			}
+			nodeDest := fmt.Sprintf("node-%d", r.Intn(nodeCount)+1)
+			for nodeSrc == nodeDest {
+				nodeDest = fmt.Sprintf("node-%d", r.Intn(nodeCount)+1)
+			}
+			fault.Params = map[string]interface{}{
+				"from":            nodeSrc,
+				"to":              nodeDest,
+				"corruption_rate": 0.1 + r.Float64()*0.4, // 0.1 to 0.5
+			}
+		case "cpu_pause":
+			fault.Params = map[string]interface{}{
+				"node":        randomNode,
+				"duration_ms": 200 + r.Intn(800), // 200 to 1000ms
+			}
+		case "slow_disk":
+			fault.Params = map[string]interface{}{
+				"node":        randomNode,
+				"duration_ms": 1000 + r.Intn(2000), // 1000 to 3000ms
+				"stall_ms":    20 + r.Intn(31),     // 20 to 50ms
+				"interval_ms": 50 + r.Intn(101),    // 50 to 150ms
+			}
+		case "disk_write_loss":
+			fault.Params = map[string]interface{}{
+				"node":          randomNode,
+				"loss_window_s": 1 + r.Intn(3), // 1 to 3 seconds
+			}
+		case "partial_persistence":
+			fault.Params = map[string]interface{}{
+				"node": randomNode,
+			}
+		case "stale_snapshot_restart":
+			fault.Params = map[string]interface{}{
+				"node":           randomNode,
+				"snapshot_index": r.Intn(3), // 0 to 2
+			}
+		case "clock_skew":
+			offset := 2000 + r.Intn(6000) // 2000 to 8000ms
+			if r.Intn(2) == 0 {
+				offset = -offset
+			}
+			fault.Params = map[string]interface{}{
+				"node":      randomNode,
+				"offset_ms": offset,
+			}
 		}
 
 		generated = append(generated, fault)

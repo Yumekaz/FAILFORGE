@@ -1,0 +1,67 @@
+name: minidb_advanced_faults_test
+seed: 99
+time:
+  duration_ms: 10000
+  tick_ms: 10
+system:
+  type: minidb
+  nodes:
+    count: 3
+    command: go run ./examples/minidb/main.go --id {node_id} --port {port} --proxy-url {proxy_url} --data-dir {data_dir}
+    ports:
+      start: 8081
+    data_dir: /tmp/failforge-minidb-adv/{node_id}
+network:
+  mode: proxy
+  proxy_port: 8999
+workload:
+  type: minidb_workload
+  clients: 3
+  duration_ms: 8000
+  keys: ["x", "y", "z"]
+  operations:
+    put: 60
+    get: 40
+faults:
+  mode: scripted
+  schedule:
+    - at_ms: 1000
+      type: clock_skew
+      params:
+        node: "node-1"
+        offset_ms: 15000
+    - at_ms: 2000
+      type: cpu_pause
+      params:
+        node: "node-2"
+        duration_ms: 800
+    - at_ms: 3000
+      type: duplicate_messages
+      params:
+        from: "client"
+        to: "node-3"
+    - at_ms: 4000
+      type: corrupt_messages
+      params:
+        from: "client"
+        to: "node-1"
+        corruption_rate: 0.8
+    - at_ms: 5000
+      type: asymmetric_partition
+      params:
+        from: "node-2"
+        to: "node-3"
+    - at_ms: 6000
+      type: disk_write_loss
+      params:
+        node: "node-1"
+        loss_window_s: 2
+    - at_ms: 7000
+      type: stale_snapshot_restart
+      params:
+        node: "node-2"
+        snapshot_index: 0
+    - at_ms: 8000
+      type: heal
+checkers:
+  - name: read_after_acknowledged_write

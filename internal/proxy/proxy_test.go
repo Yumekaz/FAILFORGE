@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -212,5 +213,211 @@ func TestProxyForwardingAndPartitions(t *testing.T) {
 	}
 	if elapsed < 100*time.Millisecond {
 		t.Errorf("expected request to take at least 100ms due to delay rule, took: %v", elapsed)
+	}
+}
+
+func TestAdvancedProxyFaults(t *testing.T) {
+	// 1. Create temp SQLite store
+	tempDir, err := os.MkdirTemp("", "failforge-proxy-adv-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	dbPath := filepath.Join(tempDir, "test.sqlite")
+	st, err := store.NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	defer st.Close()
+
+	// 2. Set up dummy target HTTP server representing "node-1"
+	var mu sync.Mutex
+	receivedBodies := []string{}
+	receivedHeaders := []http.Header{}
+	targetReceivedCount := 0
+
+	targetServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		targetReceivedCount++
+		bodyBytes, _ := io.ReadAll(r.Body)
+		receivedBodies = append(receivedBodies, string(bodyBytes))
+		receivedHeaders = append(receivedHeaders, r.Header.Clone())
+		mu.Unlock()
+
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("ok"))
+	}))
+	defer targetServer.Close()
+
+	var targetPort int
+	_, err = fmt.Sscanf(targetServer.URL, "http://127.0.0.1:%d", &targetPort)
+	if err != nil {
+		_, err = fmt.Sscanf(targetServer.URL, "http://localhost:%d", &targetPort)
+	}
+	if err != nil {
+		parts := strings.Split(targetServer.URL, ":")
+		if len(parts) > 0 {
+			fmt.Sscanf(parts[len(parts)-1], "%d", &targetPort)
+		}
+	}
+
+	resolver := &mockPortResolver{
+		ports: map[string]int{
+			"node-1": targetPort,
+			"client": 12345, // dummy port for client
+		},
+	}
+
+	// 3. Initialize Proxy
+	p := NewProxy(0, "run-2", resolver, st, func(timeMs int64, category, eventType, payloadJSON string) {
+		_ = st.CreateEvent(&model.Event{
+			RunID:       "run-2",
+			TimeMs:      timeMs,
+			Category:    category,
+			Type:        eventType,
+			PayloadJSON: payloadJSON,
+		})
+	})
+
+	proxyMux := http.NewServeMux()
+	proxyMux.HandleFunc("/", p.handleProxy)
+	proxyServer := httptest.NewServer(proxyMux)
+	defer proxyServer.Close()
+
+	// Resolve proxy server port to use for duplicate requests
+	var proxyPort int
+	_, err = fmt.Sscanf(proxyServer.URL, "http://127.0.0.1:%d", &proxyPort)
+	if err != nil {
+		_, err = fmt.Sscanf(proxyServer.URL, "http://localhost:%d", &proxyPort)
+	}
+	if err != nil {
+		parts := strings.Split(proxyServer.URL, ":")
+		if len(parts) > 0 {
+			fmt.Sscanf(parts[len(parts)-1], "%d", &proxyPort)
+		}
+	}
+	p.port = proxyPort
+
+	// Test case 1: Asymmetric Partition (client -> node-1 blocked, node-1 -> client open)
+	p.SetAsymmetricBlock("client", "node-1", true)
+
+	// client -> node-1 request
+	req1, _ := http.NewRequest("POST", proxyServer.URL+"/", strings.NewReader("msg1"))
+	req1.Header.Set("X-FailForge-From", "client")
+	req1.Header.Set("X-FailForge-To", "node-1")
+	resp1, err := http.DefaultClient.Do(req1)
+	if err == nil {
+		resp1.Body.Close()
+		if resp1.StatusCode != http.StatusGatewayTimeout {
+			t.Errorf("expected gateway timeout for asymmetric partition client->node-1, got %d", resp1.StatusCode)
+		}
+	}
+
+	// node-1 -> client request
+	req2, _ := http.NewRequest("POST", proxyServer.URL+"/", strings.NewReader("msg2"))
+	req2.Header.Set("X-FailForge-From", "node-1")
+	req2.Header.Set("X-FailForge-To", "client")
+	// Note: client port resolves to 12345, so it might fail to connect. But we check it doesn't get dropped by block.
+	// Actually, resolver.GetPort("client") returns 12345. Since nothing is listening on 12345, the proxy will return 502 Bad Gateway.
+	// But it will NOT return 504 Gateway Timeout (which is what we return for drops/partitions)!
+	resp2, err := http.DefaultClient.Do(req2)
+	if err == nil {
+		resp2.Body.Close()
+		if resp2.StatusCode == http.StatusGatewayTimeout {
+			t.Errorf("expected connection failure (502 Bad Gateway) for node-1->client, but got blocked (504)")
+		}
+	}
+
+	// Test case 2: Message Duplication
+	p.ClearAdvancedFaultRules()
+	p.SetDuplicateRule("client", "node-1", true)
+
+	mu.Lock()
+	targetReceivedCount = 0
+	receivedBodies = []string{}
+	mu.Unlock()
+
+	req3, _ := http.NewRequest("POST", proxyServer.URL+"/", strings.NewReader("ping"))
+	req3.Header.Set("X-FailForge-From", "client")
+	req3.Header.Set("X-FailForge-To", "node-1")
+	resp3, err := http.DefaultClient.Do(req3)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	resp3.Body.Close()
+
+	// Wait for background duplicate request to complete
+	time.Sleep(50 * time.Millisecond)
+
+	mu.Lock()
+	count := targetReceivedCount
+	bodies := make([]string, len(receivedBodies))
+	copy(bodies, receivedBodies)
+	mu.Unlock()
+
+	if count != 2 {
+		t.Errorf("expected target to receive request twice, got: %d", count)
+	}
+	for i, b := range bodies {
+		if b != "ping" {
+			t.Errorf("expected body %d to be 'ping', got '%s'", i, b)
+		}
+	}
+
+	// Test case 3: Packet Corruption
+	p.ClearAdvancedFaultRules()
+	p.SetCorruptionRule("client", "node-1", 1.0) // 100% corruption rate
+
+	mu.Lock()
+	targetReceivedCount = 0
+	receivedBodies = []string{}
+	mu.Unlock()
+
+	originalMsg := "this is a very long message that is going to be corrupted by the proxy!"
+	req4, _ := http.NewRequest("POST", proxyServer.URL+"/", strings.NewReader(originalMsg))
+	req4.Header.Set("X-FailForge-From", "client")
+	req4.Header.Set("X-FailForge-To", "node-1")
+	resp4, err := http.DefaultClient.Do(req4)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	resp4.Body.Close()
+
+	mu.Lock()
+	corruptedBody := receivedBodies[0]
+	mu.Unlock()
+
+	if corruptedBody == originalMsg {
+		t.Errorf("expected packet body to be corrupted, but it matched original")
+	}
+	if len(corruptedBody) != len(originalMsg) {
+		t.Errorf("expected corrupted body length %d to match original %d", len(corruptedBody), len(originalMsg))
+	}
+
+	// Test case 4: Clock Offset Header Injection
+	p.ClearAdvancedFaultRules()
+	p.SetClockOffset("node-1", 123456)
+
+	mu.Lock()
+	receivedHeaders = []http.Header{}
+	mu.Unlock()
+
+	req5, _ := http.NewRequest("GET", proxyServer.URL+"/", nil)
+	req5.Header.Set("X-FailForge-From", "client")
+	req5.Header.Set("X-FailForge-To", "node-1")
+	resp5, err := http.DefaultClient.Do(req5)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	resp5.Body.Close()
+
+	mu.Lock()
+	headers := receivedHeaders[0]
+	mu.Unlock()
+
+	offsetHeader := headers.Get("X-FailForge-Clock-Offset")
+	if offsetHeader != "123456" {
+		t.Errorf("expected X-FailForge-Clock-Offset: 123456, got: '%s'", offsetHeader)
 	}
 }

@@ -189,7 +189,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 
 	// Start faults scheduler
-	r.scheduler = faults.NewScheduler(r.cfg, r.runID, r.seed, r.outputDir, r.manager, r.proxy, r.store, r.logEvent)
+	r.scheduler = faults.NewScheduler(r.cfg, r.runID, r.seed, r.outputDir, r.manager, r.proxy, r.store, r.logEvent, nil)
 	if err := r.scheduler.Start(ctx, runRecord.StartedAt); err != nil {
 		r.cleanup(runRecord, "CRASHED")
 		return fmt.Errorf("failed to start faults scheduler: %w", err)

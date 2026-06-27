@@ -53,13 +53,58 @@ type WorkloadConfig struct {
 }
 
 type FaultConfig struct {
-	AtMs    int64      `yaml:"at_ms" json:"at_ms"`
-	Type    string     `yaml:"type" json:"type"`
-	Node    string     `yaml:"node,omitempty" json:"node,omitempty"`
-	Groups  [][]string `yaml:"groups,omitempty" json:"groups,omitempty"`
-	From    string     `yaml:"from,omitempty" json:"from,omitempty"`
-	To      string     `yaml:"to,omitempty" json:"to,omitempty"`
-	DelayMs int        `yaml:"delay_ms,omitempty" json:"delay_ms,omitempty"`
+	AtMs    int64                  `yaml:"at_ms" json:"at_ms"`
+	Type    string                 `yaml:"type" json:"type"`
+	Params  map[string]interface{} `yaml:"params,omitempty" json:"params,omitempty"`
+	Node    string                 `yaml:"node,omitempty" json:"node,omitempty"`
+	Groups  [][]string             `yaml:"groups,omitempty" json:"groups,omitempty"`
+	From    string                 `yaml:"from,omitempty" json:"from,omitempty"`
+	To      string                 `yaml:"to,omitempty" json:"to,omitempty"`
+	DelayMs int                    `yaml:"delay_ms,omitempty" json:"delay_ms,omitempty"`
+}
+
+func (fc *FaultConfig) GetParam(key string, fallback interface{}) interface{} {
+	if fc.Params == nil {
+		return fallback
+	}
+	if val, ok := fc.Params[key]; ok {
+		return val
+	}
+	return fallback
+}
+
+func (fc *FaultConfig) GetParamString(key string, fallback string) string {
+	val := fc.GetParam(key, fallback)
+	if s, ok := val.(string); ok {
+		return s
+	}
+	return fallback
+}
+
+func (fc *FaultConfig) GetParamInt(key string, fallback int) int {
+	val := fc.GetParam(key, fallback)
+	switch v := val.(type) {
+	case int:
+		return v
+	case float64:
+		return int(v)
+	case int64:
+		return int(v)
+	}
+	return fallback
+}
+
+func (fc *FaultConfig) GetParamFloat64(key string, fallback float64) float64 {
+	val := fc.GetParam(key, fallback)
+	switch v := val.(type) {
+	case float64:
+		return v
+	case int:
+		return float64(v)
+	case int64:
+		return float64(v)
+	}
+	return fallback
 }
 
 type FaultsConfig struct {
