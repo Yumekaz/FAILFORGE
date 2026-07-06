@@ -199,6 +199,8 @@ func (g *Generator) executeRequest(ctx context.Context, clientID string, targetN
 		return g.executeCoordinationRequest(ctx, clientID, targetNode, op, key, val)
 	} else if g.cfg.Workload.Type == "mini-redis-cassandra" {
 		return g.executeMiniDBRequest(ctx, clientID, targetNode, op, key, val)
+	} else if g.cfg.Workload.Type == "cairn" {
+		return g.executeCairnRequest(ctx, clientID, targetNode, op, key, val)
 	}
 
 	method := "GET"
@@ -720,4 +722,107 @@ func (g *Generator) monitorLeadership(ctx context.Context) {
 			}
 		}
 	}
+}
+
+func (g *Generator) executeCairnRequest(ctx context.Context, clientID string, targetNode string, op string, key string, val string) (string, string, string) {
+	opType := strings.ToLower(op)
+	method := "GET"
+	path := ""
+	var bodyReader io.Reader
+	inputJSON := ""
+
+	// All Cairn operations target Node 1 (cairnd daemon)
+	targetNode = "node-1"
+
+	switch opType {
+	case "deploy":
+		method = "POST"
+		path = "/services"
+		serviceName := fmt.Sprintf("ff-service-%s", clientID)
+		cfg := map[string]interface{}{
+			"name":    serviceName,
+			"kind":    "worker",
+			"image":   "/home/yumekaz/Desktop/Mini-Docker/rootfs",
+			"command": []string{"/bin/sh", "-c", "while true; do sleep 1; done"},
+		}
+		cfgBytes, _ := json.Marshal(cfg)
+		bodyReader = bytes.NewReader(cfgBytes)
+		inputJSON = string(cfgBytes)
+
+	case "status":
+		method = "GET"
+		serviceName := fmt.Sprintf("ff-service-%s", clientID)
+		path = fmt.Sprintf("/services/%s", serviceName)
+		inputJSON = fmt.Sprintf(`{"service_name":"%s"}`, serviceName)
+
+	case "backup":
+		method = "POST"
+		// Backup a test volume
+		path = "/volumes/test-vol/backups"
+		inputJSON = `{"volume_name":"test-vol"}`
+
+	case "restore":
+		method = "POST"
+		backupID := "dummy-backup"
+		path = "/volumes/test-vol/restore"
+		if val, ok := g.coordinationSessions.Load("last_backup"); ok {
+			backupID = val.(string)
+		}
+		bodyReq := map[string]string{
+			"backup_id": backupID,
+		}
+		bodyBytes, _ := json.Marshal(bodyReq)
+		bodyReader = bytes.NewReader(bodyBytes)
+		inputJSON = string(bodyBytes)
+
+	case "rollback":
+		method = "POST"
+		serviceName := fmt.Sprintf("ff-service-%s", clientID)
+		path = fmt.Sprintf("/services/%s/rollback", serviceName)
+		bodyReq := map[string]string{
+			"deploy_id": "last",
+		}
+		bodyBytes, _ := json.Marshal(bodyReq)
+		bodyReader = bytes.NewReader(bodyBytes)
+		inputJSON = string(bodyBytes)
+	}
+
+	reqURL := fmt.Sprintf("%s%s", g.proxyURL, path)
+	req, err := http.NewRequestWithContext(ctx, method, reqURL, bodyReader)
+	if err != nil {
+		return "fail", inputJSON, fmt.Sprintf(`{"error":"failed to create request: %v"}`, err)
+	}
+
+	req.Header.Set("X-FailForge-From", clientID)
+	req.Header.Set("X-FailForge-To", targetNode)
+	req.Header.Set("X-FailForge-MsgType", "client_req")
+	if method == "POST" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+
+	resp, err := g.httpClient.Do(req)
+	if err != nil {
+		return "fail", inputJSON, fmt.Sprintf(`{"error":"%s"}`, strings.ReplaceAll(err.Error(), `"`, `\"`))
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	bodyStr := strings.TrimSpace(string(respBody))
+	outputJSON := fmt.Sprintf(`{"status_code":%d,"body":"%s"}`, resp.StatusCode, strings.ReplaceAll(bodyStr, `"`, `\"`))
+
+	// If backup completed successfully, store backup ID for subsequent restore
+	if opType == "backup" && resp.StatusCode == http.StatusOK {
+		var resMap map[string]interface{}
+		if err := json.Unmarshal(respBody, &resMap); err == nil {
+			if id, ok := resMap["id"].(string); ok {
+				g.coordinationSessions.Store("last_backup", id)
+			}
+		}
+	}
+
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return "ok", inputJSON, outputJSON
+	}
+
+	return "fail", inputJSON, outputJSON
 }

@@ -6,6 +6,8 @@ var registry = map[string]Checker{
 	"read_after_acknowledged_write": &ReadAfterWriteChecker{},
 	"lock_exclusivity":              &LockExclusivityChecker{},
 	"no_two_leaders":                &LeaderUniquenessChecker{},
+	"failed_deploy_protection":      &FailedDeployProtectionChecker{},
+	"no_lost_active_volume":         &NoLostActiveVolumeChecker{},
 }
 
 func GetChecker(name string) (Checker, error) {
