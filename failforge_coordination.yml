@@ -10,7 +10,9 @@ system:
   type: process_cluster
   nodes:
     count: 3
-    command: "COORD_PORT={port} COORD_NODE_ID={node_id} COORD_DB_PATH=.failforge/data/{run_id}/{node_id}.db COORD_PEER_URLS=http://localhost:9000/node-1,http://localhost:9000/node-2,http://localhost:9000/node-3 COORD_ADVERTISE_URL=http://localhost:9000/{node_id} COORD_REQUIRE_WRITE_QUORUM=true COORD_CLUSTER_ROLE=follower COORD_ELECTION_TIMEOUT=1.5 COORD_HEARTBEAT_INTERVAL=0.3 python3 /home/yumekaz/Desktop/Coordination-service/main.py"
+    # Portable: run from FAILFORGE repo root. Override with COORD_ROOT if the
+    # sibling checkout is not at ../Coordination-service.
+    command: "COORD_PORT={port} COORD_NODE_ID={node_id} COORD_DB_PATH=.failforge/data/{run_id}/{node_id}.db COORD_PEER_URLS=http://localhost:9000/node-1,http://localhost:9000/node-2,http://localhost:9000/node-3 COORD_ADVERTISE_URL=http://localhost:9000/{node_id} COORD_REQUIRE_WRITE_QUORUM=true COORD_CLUSTER_ROLE=follower COORD_ELECTION_TIMEOUT=1.5 COORD_HEARTBEAT_INTERVAL=0.3 python3 \"${COORD_ROOT:-../Coordination-service}/main.py\""
     ports:
       start: 8000
     data_dir: ".failforge/data/{run_id}/{node_id}"

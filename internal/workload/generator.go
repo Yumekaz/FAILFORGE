@@ -528,12 +528,12 @@ func (g *Generator) executeMiniDBRequest(ctx context.Context, clientID string, t
 			"args": []string{key, val},
 		}
 	} else {
-		// Request QUORUM reads so the workload matches MiniDB's configured
-		// write consistency (R+W > N). Bare GET previously defaulted to ANY
-		// on older MiniDB builds and produced raw stale-read violations.
+		// STRONG (primary-owner) reads pair with ALL writes so an acked PUT
+		// is always visible on the owner and lagging replicas cannot surface
+		// never-acked orphan values after restarts.
 		reqMsg.Payload = map[string]interface{}{
 			"cmd":  "GET",
-			"args": []string{key, "QUORUM"},
+			"args": []string{key, "STRONG"},
 		}
 	}
 

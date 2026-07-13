@@ -12,7 +12,7 @@ system:
   type: process_cluster
   nodes:
     count: 3
-    command: "PYTHONPATH=\"${MINIDB_ROOT:-../Mini-Redis-Cassandra}\" NODE_ID={node_id} PROXY_PORT=9000 START_PORT=7001 python3 -m minidb.main --node-id {node_id} --port {port} --cluster-port $(( {port} + 1000 )) --peers localhost:8001,localhost:8002,localhost:8003 --data-dir .failforge/data/{run_id}/{node_id} --consistency QUORUM"
+    command: "PYTHONPATH=\"${MINIDB_ROOT:-../Mini-Redis-Cassandra}\" NODE_ID={node_id} PROXY_PORT=9000 START_PORT=7001 python3 -m minidb.main --node-id {node_id} --port {port} --cluster-port $(( {port} + 1000 )) --peers localhost:8001,localhost:8002,localhost:8003 --data-dir .failforge/data/{run_id}/{node_id} --consistency ALL"
     ports:
       start: 7001
     data_dir: ".failforge/data/{run_id}/{node_id}"
