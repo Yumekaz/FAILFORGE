@@ -114,6 +114,22 @@ This generates `runs/42/timeline.html`. Open it in any web browser to view the c
 
 ---
 
+## First-party targets (this portfolio)
+
+FailForge ships YAML adapters for two systems in the same Desktop stack as **Cairn**:
+
+| Target | Config | Seed demo | Notes |
+| --- | --- | --- | --- |
+| **MiniDB** (Mini-Redis-Cassandra) | `failforge_minidb.yml` | `./bin/failforge run failforge_minidb.yml --seed 42` | Sibling `../Mini-Redis-Cassandra` or `MINIDB_ROOT`. Checker: `read_after_acknowledged_write`. |
+| **Coordination-service** | `failforge_coordination.yml` | `./bin/failforge run failforge_coordination.yml --seed 42` | Prefer sibling path / `COORD_ROOT`. Checkers: `lock_exclusivity`, `no_two_leaders`. |
+
+**Proof link (MiniDB):** FailForge seed 42 exposed QUORUM write + ANY-read stale/corrupt violations; fixes and residual notes are in the MiniDB postmortem:  
+[2026-07-failforge-seed42-raw.md](https://github.com/Yumekaz/Mini-Redis-Cassandra/blob/main/docs/postmortems/2026-07-failforge-seed42-raw.md)
+
+Stack map (Cairn ↔ Mini-Docker ↔ DuraFlow ↔ FailForge): see [Cairn `docs/STACK.md`](https://github.com/Yumekaz/Cairn/blob/main/docs/STACK.md).
+
+---
+
 ## Writing an Adapter
 
 To test your own distributed key-value store, database, or coordination engine, configure it using a YAML file:
