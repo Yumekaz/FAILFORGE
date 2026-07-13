@@ -528,9 +528,12 @@ func (g *Generator) executeMiniDBRequest(ctx context.Context, clientID string, t
 			"args": []string{key, val},
 		}
 	} else {
+		// Request QUORUM reads so the workload matches MiniDB's configured
+		// write consistency (R+W > N). Bare GET previously defaulted to ANY
+		// on older MiniDB builds and produced raw stale-read violations.
 		reqMsg.Payload = map[string]interface{}{
 			"cmd":  "GET",
-			"args": []string{key},
+			"args": []string{key, "QUORUM"},
 		}
 	}
 
