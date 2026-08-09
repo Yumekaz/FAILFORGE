@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"net/http"
@@ -18,6 +19,29 @@ import (
 
 type mockPortResolver struct {
 	ports map[string]int
+}
+
+func TestCorruptionChoicesAreDeterministicPerRunSeed(t *testing.T) {
+	body := []byte("a deterministic payload with enough bytes for several corruption choices")
+
+	firstProxy := NewProxy(0, "run-1", nil, nil, nil)
+	firstProxy.SetSeed(12345)
+	first, firstCount := corruptBytes(body, firstProxy.nextCorruptionRNG())
+
+	secondProxy := NewProxy(0, "run-2", nil, nil, nil)
+	secondProxy.SetSeed(12345)
+	second, secondCount := corruptBytes(body, secondProxy.nextCorruptionRNG())
+
+	if firstCount != secondCount || !bytes.Equal(first, second) {
+		t.Fatalf("same run seed produced different corruption: first=%x/%d second=%x/%d", first, firstCount, second, secondCount)
+	}
+
+	differentProxy := NewProxy(0, "run-3", nil, nil, nil)
+	differentProxy.SetSeed(54321)
+	different, differentCount := corruptBytes(body, differentProxy.nextCorruptionRNG())
+	if differentCount == firstCount && bytes.Equal(different, first) {
+		t.Fatalf("different run seed produced identical corruption: %x/%d", different, differentCount)
+	}
 }
 
 func (m *mockPortResolver) GetPort(nodeID string) (int, error) {

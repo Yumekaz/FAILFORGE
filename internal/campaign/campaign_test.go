@@ -1,12 +1,68 @@
 package campaign
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"failforge/internal/config"
+	"failforge/internal/runner"
 )
+
+type stubCampaignRunner struct {
+	result *runner.RunResult
+	err    error
+}
+
+func (s stubCampaignRunner) RunAndReport(context.Context) (*runner.RunResult, error) {
+	return s.result, s.err
+}
+
+func TestRunCampaignRecordsCrashedSeedWhenRunnerReturnsNil(t *testing.T) {
+	t.Chdir(t.TempDir())
+	originalFactory := newCampaignRunner
+	t.Cleanup(func() { newCampaignRunner = originalFactory })
+	newCampaignRunner = func(*config.Config, *int64, string) (campaignRunner, error) {
+		return stubCampaignRunner{err: errors.New("simulated runner crash")}, nil
+	}
+
+	result, err := RunCampaign(context.Background(), &config.Config{}, "config.yml", 42, 42, false)
+	if err != nil {
+		t.Fatalf("RunCampaign returned unexpected error: %v", err)
+	}
+	if result.Crashed != 1 || len(result.SeedResults) != 1 {
+		t.Fatalf("expected one crashed seed, got crashed=%d results=%d", result.Crashed, len(result.SeedResults))
+	}
+	seedResult := result.SeedResults[0]
+	if seedResult.Status != "CRASHED" || seedResult.RunID != "" || seedResult.Seed != 42 {
+		t.Fatalf("unexpected crashed seed result: %+v", seedResult)
+	}
+}
+
+func TestRunCampaignStopsSeedLoopWhenContextIsCancelled(t *testing.T) {
+	t.Chdir(t.TempDir())
+	originalFactory := newCampaignRunner
+	t.Cleanup(func() { newCampaignRunner = originalFactory })
+	factoryCalls := 0
+	newCampaignRunner = func(*config.Config, *int64, string) (campaignRunner, error) {
+		factoryCalls++
+		return stubCampaignRunner{result: &runner.RunResult{RunID: "unexpected", Status: "PASSED"}}, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	result, err := RunCampaign(ctx, &config.Config{}, "config.yml", 1, 3, false)
+	if err != nil {
+		t.Fatalf("RunCampaign returned unexpected error: %v", err)
+	}
+	if !result.StoppedEarly || result.Aborted != 1 || len(result.SeedResults) != 0 || factoryCalls != 0 {
+		t.Fatalf("expected cancelled campaign to stop before first seed: result=%+v factoryCalls=%d", result, factoryCalls)
+	}
+}
 
 func TestGroupFailures(t *testing.T) {
 	results := []SeedResult{

@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"failforge/internal/model"
@@ -25,33 +26,35 @@ type PortResolver interface {
 }
 
 type Proxy struct {
-	mu           sync.RWMutex
-	port         int
-	resolver     PortResolver
-	store        *store.Store
-	runID        string
-	startTime    time.Time
-	server       *http.Server
-	partitions   map[string]map[string]bool // fromNode -> toNode -> isBlocked
-	messageCount int
-	onEvent      func(timeMs int64, category, eventType, payloadJSON string)
+	mu               sync.RWMutex
+	port             int
+	resolver         PortResolver
+	store            *store.Store
+	runID            string
+	startTime        time.Time
+	server           *http.Server
+	partitions       map[string]map[string]bool // fromNode -> toNode -> isBlocked
+	messageCount     int
+	onEvent          func(timeMs int64, category, eventType, payloadJSON string)
 	dropRules        map[string]map[string]bool
 	delayRules       map[string]map[string]time.Duration
 	duplicateRules   map[string]map[string]bool
 	corruptionRules  map[string]map[string]float64
 	asymmetricBlocks map[string]map[string]bool
 	clockOffsets     map[string]int64
+	seed             int64
+	corruptionSeq    uint64
 }
 
 func NewProxy(port int, runID string, resolver PortResolver, store *store.Store, onEvent func(timeMs int64, category, eventType, payloadJSON string)) *Proxy {
 	return &Proxy{
-		port:       port,
-		resolver:   resolver,
-		store:      store,
-		runID:      runID,
-		startTime:  time.Now(),
-		partitions: make(map[string]map[string]bool),
-		onEvent:    onEvent,
+		port:             port,
+		resolver:         resolver,
+		store:            store,
+		runID:            runID,
+		startTime:        time.Now(),
+		partitions:       make(map[string]map[string]bool),
+		onEvent:          onEvent,
 		dropRules:        make(map[string]map[string]bool),
 		delayRules:       make(map[string]map[string]time.Duration),
 		duplicateRules:   make(map[string]map[string]bool),
@@ -63,6 +66,50 @@ func NewProxy(port int, runID string, resolver PortResolver, store *store.Store,
 
 func (p *Proxy) getElapsedTimeMs() int64 {
 	return time.Since(p.startTime).Milliseconds()
+}
+
+// SetSeed configures the run seed used for deterministic corruption choices.
+// The sequence counter is reset because a proxy belongs to one run.
+func (p *Proxy) SetSeed(seed int64) {
+	p.mu.Lock()
+	p.seed = seed
+	p.mu.Unlock()
+	atomic.StoreUint64(&p.corruptionSeq, 0)
+}
+
+func (p *Proxy) nextCorruptionRNG() *mrand.Rand {
+	sequence := atomic.AddUint64(&p.corruptionSeq, 1)
+	p.mu.RLock()
+	seed := p.seed
+	p.mu.RUnlock()
+
+	return mrand.New(mrand.NewSource(mixCorruptionSeed(seed, sequence)))
+}
+
+func mixCorruptionSeed(seed int64, sequence uint64) int64 {
+	// SplitMix64 gives each (run seed, message sequence) pair a stable,
+	// well-distributed local PRNG seed without sharing mutable rand state.
+	z := uint64(seed) + sequence + 0x9e3779b97f4a7c15
+	z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9
+	z = (z ^ (z >> 27)) * 0x94d049bb133111eb
+	z ^= z >> 31
+	return int64(z)
+}
+
+func corruptBytes(body []byte, rng *mrand.Rand) ([]byte, int) {
+	corruptedBytes := make([]byte, len(body))
+	copy(corruptedBytes, body)
+
+	// Corrupt 1 to 3 random bytes.
+	numCorruptions := rng.Intn(3) + 1
+	if numCorruptions > len(corruptedBytes) {
+		numCorruptions = len(corruptedBytes)
+	}
+	for i := 0; i < numCorruptions; i++ {
+		pos := rng.Intn(len(corruptedBytes))
+		corruptedBytes[pos] ^= 0xFF // flip bits
+	}
+	return corruptedBytes, numCorruptions
 }
 
 func (p *Proxy) generateMsgID() string {
@@ -395,27 +442,21 @@ func (p *Proxy) handleProxy(w http.ResponseWriter, r *http.Request) {
 
 	// Packet corruption check
 	corruptionRate := p.getCorruptionRate(fromNode, toNode)
-	if corruptionRate > 0 && mrand.Float64() < corruptionRate && len(bodyBytes) > 0 {
-		corruptedBytes := make([]byte, len(bodyBytes))
-		copy(corruptedBytes, bodyBytes)
-
-		// Corrupt 1 to 3 random bytes
-		rng := mrand.New(mrand.NewSource(time.Now().UnixNano()))
-		numCorruptions := rng.Intn(3) + 1
-		if numCorruptions > len(corruptedBytes) {
-			numCorruptions = len(corruptedBytes)
+	if corruptionRate > 0 && len(bodyBytes) > 0 {
+		rng := p.nextCorruptionRNG()
+		if rng.Float64() >= corruptionRate {
+			rng = nil
 		}
-		for i := 0; i < numCorruptions; i++ {
-			pos := rng.Intn(len(corruptedBytes))
-			corruptedBytes[pos] ^= 0xFF // flip bits
-		}
-		r.Body = io.NopCloser(bytes.NewReader(corruptedBytes))
+		if rng != nil {
+			corruptedBytes, numCorruptions := corruptBytes(bodyBytes, rng)
+			r.Body = io.NopCloser(bytes.NewReader(corruptedBytes))
 
-		corruptTimeMs := p.getElapsedTimeMs()
-		p.onEvent(corruptTimeMs, "Message", "MessageCorrupted", fmt.Sprintf(
-			`{"from":"%s","to":"%s","bytes_corrupted":%d}`,
-			fromNode, toNode, numCorruptions,
-		))
+			corruptTimeMs := p.getElapsedTimeMs()
+			p.onEvent(corruptTimeMs, "Message", "MessageCorrupted", fmt.Sprintf(
+				`{"from":"%s","to":"%s","bytes_corrupted":%d}`,
+				fromNode, toNode, numCorruptions,
+			))
+		}
 	}
 
 	msgID := p.generateMsgID()

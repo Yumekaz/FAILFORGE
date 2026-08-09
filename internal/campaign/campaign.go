@@ -45,6 +45,14 @@ type CampaignResult struct {
 	Elapsed       time.Duration      `json:"elapsed"`
 }
 
+type campaignRunner interface {
+	RunAndReport(context.Context) (*runner.RunResult, error)
+}
+
+var newCampaignRunner = func(cfg *config.Config, seed *int64, outputDir string) (campaignRunner, error) {
+	return runner.NewRunner(cfg, seed, outputDir)
+}
+
 func RunCampaign(ctx context.Context, cfg *config.Config, configPath string, seedStart, seedEnd int64, stopOnFailure bool) (*CampaignResult, error) {
 	startTime := time.Now()
 
@@ -66,12 +74,13 @@ func RunCampaign(ctx context.Context, cfg *config.Config, configPath string, see
 	}
 
 	// 2. Sequentially execute each seed in the range
+campaignLoop:
 	for seed := seedStart; seed <= seedEnd; seed++ {
 		select {
 		case <-ctx.Done():
 			res.StoppedEarly = true
 			res.Aborted++
-			break
+			break campaignLoop
 		default:
 		}
 
@@ -82,7 +91,7 @@ func RunCampaign(ctx context.Context, cfg *config.Config, configPath string, see
 
 		// Create a separate runner instance for this seed
 		sOverride := seed
-		rn, err := runner.NewRunner(cfg, &sOverride, seedOutputDir)
+		rn, err := newCampaignRunner(cfg, &sOverride, seedOutputDir)
 		if err != nil {
 			res.SeedResults = append(res.SeedResults, SeedResult{
 				Seed:      seed,
@@ -98,14 +107,18 @@ func RunCampaign(ctx context.Context, cfg *config.Config, configPath string, see
 		runRes, runErr := rn.RunAndReport(ctx)
 		elapsed := time.Since(seedStartTime)
 
-		status := "PASSED"
+		status := "CRASHED"
 		violationCount := 0
 		violationSummaries := []ViolationSummary{}
+		runID := ""
 
 		if runRes != nil {
+			runID = runRes.RunID
 			status = runRes.Status
 			violationCount = runRes.ViolationCount
 		} else if runErr != nil {
+			// A nil result cannot provide a run ID or status. Keep the seed
+			// represented in the campaign as a clean crash instead of panicking.
 			status = "CRASHED"
 		}
 
@@ -130,7 +143,7 @@ func RunCampaign(ctx context.Context, cfg *config.Config, configPath string, see
 
 		seedRes := SeedResult{
 			Seed:           seed,
-			RunID:          runRes.RunID,
+			RunID:          runID,
 			Status:         status,
 			ViolationCount: violationCount,
 			Violations:     violationSummaries,
@@ -157,7 +170,7 @@ func RunCampaign(ctx context.Context, cfg *config.Config, configPath string, see
 		if violationCount > 0 && stopOnFailure {
 			res.StoppedEarly = true
 			fmt.Printf("Stop on failure enabled. Stopping campaign after failure in seed %d.\n", seed)
-			break
+			break campaignLoop
 		}
 	}
 

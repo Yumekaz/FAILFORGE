@@ -171,6 +171,7 @@ func (r *Runner) Run(ctx context.Context) error {
 
 	// 3. Initialize & Start Proxy
 	r.proxy = proxy.NewProxy(r.cfg.Network.ProxyPort, r.runID, r.manager, r.store, r.logEvent)
+	r.proxy.SetSeed(r.seed)
 	proxyErrChan := make(chan error, 1)
 	go func() {
 		if err := r.proxy.Start(); err != nil {
@@ -404,7 +405,7 @@ type RunResult struct {
 
 func (r *Runner) RunAndReport(ctx context.Context) (*RunResult, error) {
 	err := r.Run(ctx)
-	
+
 	// Close store to release locks so other processes or the campaign manager can read it.
 	r.store.Close()
 
