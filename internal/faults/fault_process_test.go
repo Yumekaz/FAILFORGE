@@ -16,6 +16,7 @@ func TestCpuPauseFault(t *testing.T) {
 		System: config.SystemConfig{
 			Nodes: config.NodesConfig{
 				Count:   1,
+				Command: "sleep 10",
 				Ports:   config.PortsConfig{Start: 8080},
 				DataDir: tempDir + "/data-{node_id}",
 			},
@@ -37,11 +38,6 @@ func TestCpuPauseFault(t *testing.T) {
 		t.Fatalf("expected initialized nodes")
 	}
 
-	// PauseNode/ResumeNode requires node to be in RUNNING/PAUSED states
-	// Let's call startNodeUnlocked mock, or just manipulate states directly using internal access if we can.
-	// But nm.nodes is private. nm.StartNode(ctx, "node-1") actually starts a real process.
-	// Wait, we can define a command that runs a sleep command, e.g. "sleep 10" in the command config!
-	cfg.System.Nodes.Command = "sleep 10"
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -73,8 +69,8 @@ func TestCpuPauseFault(t *testing.T) {
 		t.Fatalf("injection failed: %v", err)
 	}
 
-	// Wait for CPU pause to complete (100ms duration)
-	time.Sleep(200 * time.Millisecond)
+	// Wait for the asynchronous resume with ample scheduler/process headroom.
+	time.Sleep(500 * time.Millisecond)
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -101,6 +97,7 @@ func TestSlowDiskFault(t *testing.T) {
 		System: config.SystemConfig{
 			Nodes: config.NodesConfig{
 				Count:   1,
+				Command: "sleep 10",
 				Ports:   config.PortsConfig{Start: 8080},
 				DataDir: tempDir + "/data-{node_id}",
 			},
@@ -116,7 +113,6 @@ func TestSlowDiskFault(t *testing.T) {
 	}
 
 	nm := node.NewNodeManager(cfg, "run-1", tempDir, onEvent)
-	cfg.System.Nodes.Command = "sleep 10"
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -166,5 +162,8 @@ func TestSlowDiskFault(t *testing.T) {
 	// We expect multiple micro-pauses within 300ms (stall 20ms + interval 50ms = ~70ms cycle time. 300ms / 70ms = ~4 cycles)
 	if pausedCount < 2 || resumedCount < 2 {
 		t.Errorf("expected multiple micro-pauses, got paused: %d, resumed: %d. Events: %v", pausedCount, resumedCount, events)
+	}
+	if state := nm.GetNodesStatus()["node-1"]; state != node.StateRunning {
+		t.Errorf("slow_disk left node in %s instead of RUNNING", state)
 	}
 }

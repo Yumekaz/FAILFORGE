@@ -323,7 +323,9 @@ func (nm *NodeManager) PauseNode(nodeID string) error {
 	}
 
 	if np.Cmd != nil && np.Cmd.Process != nil {
-		syscall.Kill(-np.Cmd.Process.Pid, syscall.SIGSTOP)
+		if err := syscall.Kill(-np.Cmd.Process.Pid, syscall.SIGSTOP); err != nil {
+			return fmt.Errorf("pause node %s: %w", nodeID, err)
+		}
 	}
 	np.State = StatePaused
 
@@ -346,7 +348,9 @@ func (nm *NodeManager) ResumeNode(nodeID string) error {
 	}
 
 	if np.Cmd != nil && np.Cmd.Process != nil {
-		syscall.Kill(-np.Cmd.Process.Pid, syscall.SIGCONT)
+		if err := syscall.Kill(-np.Cmd.Process.Pid, syscall.SIGCONT); err != nil {
+			return fmt.Errorf("resume node %s: %w", nodeID, err)
+		}
 	}
 	np.State = StateRunning
 

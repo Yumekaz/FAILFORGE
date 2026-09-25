@@ -150,16 +150,7 @@ func (s *Scheduler) injectFault(ctx context.Context, f config.FaultConfig) {
 	// Log event to SQLite timeline
 	s.onEvent(timeMs, "Fault", f.Type, payloadJSON)
 
-	// Record violation/evidence of fault injection in DB
-	_ = s.store.CreateViolation(&model.Violation{
-		RunID:        s.runID,
-		CheckerName:  "fault_injector",
-		Severity:     "info",
-		Description:  fmt.Sprintf("Injected network/process fault of type: %s", f.Type),
-		EvidenceJSON: payloadJSON,
-	})
-
-	log.Printf("[Scheduler] [%dms] Injecting fault %s: %s\n", timeMs, f.Type, payloadJSON)
+	log.Printf("[Scheduler] [%dms] Attempting fault %s: %s\n", timeMs, f.Type, payloadJSON)
 
 	fctx := &FaultContext{
 		Config:    &f,
@@ -185,7 +176,24 @@ func (s *Scheduler) injectFault(ctx context.Context, f config.FaultConfig) {
 
 	if err := fault.Inject(ctx, fctx); err != nil {
 		log.Printf("[Scheduler] Error injecting fault %s: %v\n", f.Type, err)
+		failurePayload, _ := json.Marshal(map[string]string{"fault": f.Type, "error": err.Error()})
+		s.onEvent(timeMs, "Fault", "FaultInjectionFailed", string(failurePayload))
+		_ = s.store.CreateViolation(&model.Violation{
+			RunID:        s.runID,
+			CheckerName:  "fault_injector",
+			Severity:     "warning",
+			Description:  fmt.Sprintf("Fault injection failed: %s", f.Type),
+			EvidenceJSON: string(failurePayload),
+		})
+		return
 	}
+	_ = s.store.CreateViolation(&model.Violation{
+		RunID:        s.runID,
+		CheckerName:  "fault_injector",
+		Severity:     "info",
+		Description:  fmt.Sprintf("Injected network/process fault of type: %s", f.Type),
+		EvidenceJSON: payloadJSON,
+	})
 }
 
 func (s *Scheduler) generateRandomSchedule() []config.FaultConfig {
