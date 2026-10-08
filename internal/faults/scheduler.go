@@ -68,7 +68,7 @@ func (s *Scheduler) Start(ctx context.Context, startTime time.Time) error {
 
 	// 1. Resolve schedule
 	if strings.ToLower(s.cfg.Faults.Mode) == "scripted" {
-		s.schedule = s.cfg.Faults.Schedule
+		s.schedule = append([]config.FaultConfig(nil), s.cfg.Faults.Schedule...)
 	} else if strings.ToLower(s.cfg.Faults.Mode) == "seeded_random" {
 		s.schedule = s.generateRandomSchedule()
 		// Save generated faults schedule to runs/<run_id>/faults.json
@@ -86,6 +86,11 @@ func (s *Scheduler) Start(ctx context.Context, startTime time.Time) error {
 			return fmt.Errorf("failed to parse faults.json: %w", err)
 		}
 	}
+
+	// Fault schedules are expressed relative to the workload phase. Shift them
+	// past the configured node-settle period so startup/election time is not
+	// accidentally counted as injected-fault behavior.
+	s.shiftScheduleForWarmup()
 
 	// Sort schedule by AtMs ascending
 	sort.Slice(s.schedule, func(i, j int) bool {
@@ -106,6 +111,16 @@ func (s *Scheduler) Start(ctx context.Context, startTime time.Time) error {
 	go s.runLoop(schedCtx)
 
 	return nil
+}
+
+func (s *Scheduler) shiftScheduleForWarmup() {
+	offsetMs := s.cfg.Time.WarmupMs + s.cfg.Faults.StartAfterMs
+	if offsetMs <= 0 {
+		return
+	}
+	for i := range s.schedule {
+		s.schedule[i].AtMs += int64(offsetMs)
+	}
 }
 
 func (s *Scheduler) Stop() {
@@ -147,10 +162,25 @@ func (s *Scheduler) injectFault(ctx context.Context, f config.FaultConfig) {
 	payloadBytes, _ := json.Marshal(f)
 	payloadJSON := string(payloadBytes)
 
-	// Log event to SQLite timeline
-	s.onEvent(timeMs, "Fault", f.Type, payloadJSON)
+	// Keep attempts distinct from faults that actually reached their effect.
+	s.onEvent(timeMs, "Fault", "FaultAttempted", payloadJSON)
 
 	log.Printf("[Scheduler] [%dms] Attempting fault %s: %s\n", timeMs, f.Type, payloadJSON)
+	fail := func(err error) {
+		failurePayload, _ := json.Marshal(map[string]string{
+			"fault": f.Type,
+			"error": err.Error(),
+		})
+		completedMs := time.Since(s.startTime).Milliseconds()
+		s.onEvent(completedMs, "Fault", "FaultInjectionFailed", string(failurePayload))
+		_ = s.store.CreateViolation(&model.Violation{
+			RunID:        s.runID,
+			CheckerName:  "fault_injector",
+			Severity:     "warning",
+			Description:  fmt.Sprintf("Fault injection failed: %s", f.Type),
+			EvidenceJSON: string(failurePayload),
+		})
+	}
 
 	fctx := &FaultContext{
 		Config:    &f,
@@ -165,28 +195,26 @@ func (s *Scheduler) injectFault(ctx context.Context, f config.FaultConfig) {
 
 	fault, ok := s.registry.Get(f.Type)
 	if !ok {
-		log.Printf("[Scheduler] Unknown fault type: %s\n", f.Type)
+		err := fmt.Errorf("unknown fault type %q", f.Type)
+		log.Printf("[Scheduler] %v\n", err)
+		fail(err)
 		return
 	}
 
 	if err := fault.Validate(&f); err != nil {
 		log.Printf("[Scheduler] Validation failed for fault %s: %v\n", f.Type, err)
+		fail(err)
 		return
 	}
 
 	if err := fault.Inject(ctx, fctx); err != nil {
 		log.Printf("[Scheduler] Error injecting fault %s: %v\n", f.Type, err)
-		failurePayload, _ := json.Marshal(map[string]string{"fault": f.Type, "error": err.Error()})
-		s.onEvent(timeMs, "Fault", "FaultInjectionFailed", string(failurePayload))
-		_ = s.store.CreateViolation(&model.Violation{
-			RunID:        s.runID,
-			CheckerName:  "fault_injector",
-			Severity:     "warning",
-			Description:  fmt.Sprintf("Fault injection failed: %s", f.Type),
-			EvidenceJSON: string(failurePayload),
-		})
+		fail(err)
 		return
 	}
+
+	completedMs := time.Since(s.startTime).Milliseconds()
+	s.onEvent(completedMs, "Fault", "FaultInjected", payloadJSON)
 	_ = s.store.CreateViolation(&model.Violation{
 		RunID:        s.runID,
 		CheckerName:  "fault_injector",
@@ -276,8 +304,12 @@ func (s *Scheduler) generateRandomSchedule() []config.FaultConfig {
 	}
 
 	durationMs := int64(s.cfg.Time.DurationMs)
-	if durationMs == 0 {
+	if durationMs <= 0 {
 		durationMs = 5000
+	}
+	durationMs -= int64(s.cfg.Faults.StartAfterMs)
+	if durationMs <= 0 {
+		return nil
 	}
 
 	startBuffer := int64(500)
@@ -333,25 +365,15 @@ func (s *Scheduler) generateRandomSchedule() []config.FaultConfig {
 				}
 			}
 			if len(g1) == 0 {
-				g1 = append(g1, fmt.Sprintf("node-%d", r.Intn(nodeCount)+1))
-			}
-			// ensure g2 is not empty by matching remaining nodes
-			for n := 1; n <= nodeCount; n++ {
-				nodeID := fmt.Sprintf("node-%d", n)
-				found := false
-				for _, val := range g1 {
-					if val == nodeID {
-						found = true
-						break
-					}
-				}
-				if !found {
-					g2 = append(g2, nodeID)
-				}
+				g1 = append(g1, g2[0])
+				g2 = g2[1:]
 			}
 			if len(g2) == 0 {
-				g1 = []string{"node-1"}
-				g2 = []string{"node-2", "node-3"}
+				if len(g1) < 2 {
+					continue
+				}
+				g2 = append(g2, g1[len(g1)-1])
+				g1 = g1[:len(g1)-1]
 			}
 			fault.Groups = [][]string{g1, g2}
 			activePartitions = true

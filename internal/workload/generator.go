@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -34,6 +35,7 @@ type Generator struct {
 	coordinationSessions sync.Map
 	mu                   sync.RWMutex
 	currentLeader        string
+	OnHistoryError       func(error)
 }
 
 type OpWeight struct {
@@ -95,6 +97,7 @@ func (g *Generator) Start(ctx context.Context, startTime time.Time) {
 		}
 		totalWeight = 10
 	}
+	sort.Slice(opWeights, func(i, j int) bool { return opWeights[i].name < opWeights[j].name })
 
 	// 2. Setup deterministic seeds for client goroutines
 	masterRand := rand.New(rand.NewSource(g.seed))
@@ -151,7 +154,9 @@ func (g *Generator) worker(ctx context.Context, wg *sync.WaitGroup, clientID str
 
 			// Select key, value, and target node deterministically
 			key := keys[r.Intn(len(keys))]
-			val := fmt.Sprintf("%d", r.Intn(100))
+			// Consume the same seeded choice but make each write identifiable.
+			// Reused values made stale-read evidence point to the wrong write.
+			val := fmt.Sprintf("%s-%d", opID, r.Intn(100))
 			targetIdx := r.Intn(nodeCount) + 1
 			targetNode := fmt.Sprintf("node-%d", targetIdx)
 
@@ -166,7 +171,7 @@ func (g *Generator) worker(ctx context.Context, wg *sync.WaitGroup, clientID str
 			endMs := time.Since(g.startTime).Milliseconds()
 
 			// Log completed operation record to DB
-			_ = g.store.CreateOperation(&model.Operation{
+			if err := g.store.CreateOperation(&model.Operation{
 				OpID:       opID,
 				RunID:      g.runID,
 				ClientID:   clientID,
@@ -176,7 +181,9 @@ func (g *Generator) worker(ctx context.Context, wg *sync.WaitGroup, clientID str
 				StartMs:    startMs,
 				EndMs:      endMs,
 				Status:     opStatus,
-			})
+			}); err != nil && g.OnHistoryError != nil {
+				g.OnHistoryError(err)
+			}
 
 			g.onEvent(endMs, "Operation", "OperationCompleted", fmt.Sprintf(
 				`{"op_id":"%s","client_id":"%s","op":"%s","status":"%s","latency_ms":%d}`,
@@ -421,6 +428,28 @@ func (g *Generator) executeCoordinationRequest(ctx context.Context, clientID str
 	} else if opType == "put" {
 		path := "/data/" + key
 		inputJSON := fmt.Sprintf(`{"key":"%s","value":"%s"}`, path, val)
+
+		// The node-create API requires an existing parent. Bootstrap the
+		// workload namespace through the same leader/quorum path; otherwise a
+		// fresh cluster produces only missing-parent failures for every write.
+		parentPayload, _ := json.Marshal(map[string]interface{}{"path": "/data", "data": "", "persistent": true})
+		parentReq, err := http.NewRequestWithContext(ctx, "POST", g.proxyURL+"/api/node/create", bytes.NewBuffer(parentPayload))
+		if err != nil {
+			return "fail", inputJSON, fmt.Sprintf(`{"error":%q}`, err.Error())
+		}
+		parentReq.Header.Set("X-FailForge-From", clientID)
+		parentReq.Header.Set("X-FailForge-To", targetNode)
+		parentReq.Header.Set("X-FailForge-MsgType", "client_req")
+		parentReq.Header.Set("Content-Type", "application/json")
+		parentResp, err := g.httpClient.Do(parentReq)
+		if err != nil {
+			return "fail", inputJSON, fmt.Sprintf(`{"error":%q}`, err.Error())
+		}
+		parentBody, _ := io.ReadAll(parentResp.Body)
+		parentResp.Body.Close()
+		if parentResp.StatusCode != http.StatusOK && parentResp.StatusCode != http.StatusConflict {
+			return "fail", inputJSON, fmt.Sprintf(`{"status_code":%d,"body":%q}`, parentResp.StatusCode, string(parentBody))
+		}
 
 		reqPayload := map[string]interface{}{
 			"path":       path,

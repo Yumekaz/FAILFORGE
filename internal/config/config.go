@@ -21,6 +21,7 @@ type Config struct {
 type TimeConfig struct {
 	DurationMs int `yaml:"duration_ms"`
 	TickMs     int `yaml:"tick_ms"`
+	WarmupMs   int `yaml:"warmup_ms,omitempty"`
 }
 
 type SystemConfig struct {
@@ -45,11 +46,13 @@ type NetworkConfig struct {
 }
 
 type WorkloadConfig struct {
-	Type       string                 `yaml:"type"`
-	Clients    int                    `yaml:"clients"`
-	DurationMs int                    `yaml:"duration_ms"`
-	Keys       []string               `yaml:"keys,omitempty"`
-	Operations map[string]interface{} `yaml:"operations"`
+	Type                         string                 `yaml:"type"`
+	Clients                      int                    `yaml:"clients"`
+	DurationMs                   int                    `yaml:"duration_ms"`
+	Keys                         []string               `yaml:"keys,omitempty"`
+	Operations                   map[string]interface{} `yaml:"operations"`
+	MinimumSuccessfulOperations  int                    `yaml:"minimum_successful_operations,omitempty"`
+	MinimumSuccessfulByOperation map[string]int         `yaml:"minimum_successful_by_operation,omitempty"`
 }
 
 type FaultConfig struct {
@@ -108,9 +111,11 @@ func (fc *FaultConfig) GetParamFloat64(key string, fallback float64) float64 {
 }
 
 type FaultsConfig struct {
-	Mode     string                 `yaml:"mode"`
-	Schedule []FaultConfig          `yaml:"schedule,omitempty"`
-	Profile  map[string]interface{} `yaml:"profile,omitempty"`
+	Mode                        string                 `yaml:"mode"`
+	Schedule                    []FaultConfig          `yaml:"schedule,omitempty"`
+	Profile                     map[string]interface{} `yaml:"profile,omitempty"`
+	StartAfterMs                int                    `yaml:"start_after_ms,omitempty"`
+	MinimumSuccessfulInjections int                    `yaml:"minimum_successful_injections,omitempty"`
 }
 
 type CheckerConfig struct {

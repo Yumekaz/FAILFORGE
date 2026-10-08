@@ -55,8 +55,15 @@ var runCmd = &cobra.Command{
 		fmt.Printf("Run ID:     %s\n", rn.GetRunID())
 		fmt.Printf("Output Dir: %s\n", rn.GetOutputDir())
 
-		if err := rn.Run(ctx); err != nil {
+		result, err := rn.RunAndReport(ctx)
+		if err != nil {
 			return fmt.Errorf("run failed: %w", err)
+		}
+		if result == nil || result.Status != "PASSED" {
+			if result == nil {
+				return fmt.Errorf("run produced no result")
+			}
+			return fmt.Errorf("run status is %s; configured checks failed or coverage was insufficient (see %s)", result.Status, result.OutputDir)
 		}
 
 		fmt.Println("FailForge run completed successfully.")

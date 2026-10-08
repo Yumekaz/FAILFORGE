@@ -64,8 +64,8 @@ func TestTimelineVisualizer(t *testing.T) {
 			RunID:       runID,
 			TimeMs:      150,
 			Category:    "Fault",
-			Type:        "partition",
-			PayloadJSON: `{"groups":[["node-1"],["node-2"]]}`,
+			Type:        "FaultInjected",
+			PayloadJSON: `{"type":"partition","groups":[["node-1"],["node-2"]]}`,
 		},
 		{
 			RunID:       runID,

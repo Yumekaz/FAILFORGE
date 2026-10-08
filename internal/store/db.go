@@ -20,10 +20,21 @@ func NewStore(dbPath string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to open sqlite database: %w", err)
 	}
+	// busy_timeout is connection-local. Keep all history reads/writes on
+	// one configured connection so concurrent clients cannot silently use
+	// an unconfigured connection and lose operation evidence to SQLITE_BUSY.
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
 
 	// Set busy timeout and enable WAL journal mode for concurrent-safe execution
-	_, _ = db.Exec("PRAGMA busy_timeout = 5000;")
-	_, _ = db.Exec("PRAGMA journal_mode = WAL;")
+	if _, err := db.Exec("PRAGMA busy_timeout = 5000;"); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if _, err := db.Exec("PRAGMA journal_mode = WAL;"); err != nil {
+		db.Close()
+		return nil, err
+	}
 
 	s := &Store{db: db}
 	if err := s.migrate(); err != nil {

@@ -47,7 +47,7 @@ FailForge comes with a polymorphic fault engine supporting **15 distinct network
 | **Logical** | `clock_skew` | Injects virtual clock drift on messages via headers. |
 
 ### Supported Correctness Checkers
-* **`read_after_acknowledged_write`**: Verifies register consistency. If a write completes at time $T$, no subsequent read operation can return a value older than that write.
+* **`read_after_acknowledged_write`**: Detects missing acknowledged values, values with no preceding/overlapping write attempt, and definitely stale values ordered before a newer acknowledged write. Overlapping writes are not ordered merely by response arrival. Failed/timed-out writes may partially apply; their effect is indeterminate. This checker is not a complete linearizability proof.
 
 ---
 
@@ -125,6 +125,15 @@ FailForge ships YAML adapters for two systems in the same Desktop stack as **Cai
 
 **Proof link (MiniDB):** FailForge seed 42 exposed QUORUM write + ANY-read stale/corrupt violations; fixes and residual notes are in the MiniDB postmortem:  
 [2026-07-failforge-seed42-raw.md](https://github.com/Yumekaz/Mini-Redis-Cassandra/blob/main/docs/postmortems/2026-07-failforge-seed42-raw.md)
+
+The first-party profiles now allow a node-settle window and require minimum
+successful workload operations plus at least one completed fault injection.
+
+The 2026-10-08 retained acceptance matrix passed MiniDB seeds 42/43 and Coordination's no-fault baseline plus seeds 42/43. MiniDB campaigns use ports 27001–27003 and proxy 29000; Coordination uses ports 25000–25002 and proxy 25090. Workload values identify individual write attempts, and node cancellation targets its process group so leftover children cannot silently contaminate the following run. Preserve the seed, full history, source revision/patch and coverage result when interpreting a pass.
+Timelines distinguish `FaultAttempted`, `FaultInjected`, and
+`FaultInjectionFailed`; a request that never produced successful workload or
+fault evidence is not reported as a passing campaign. Each run uses its own
+run-ID output directory so a new seed run does not replace older evidence.
 
 Stack map (Cairn ↔ Mini-Docker ↔ DuraFlow ↔ FailForge): see [Cairn `docs/STACK.md`](https://github.com/Yumekaz/Cairn/blob/main/docs/STACK.md).
 

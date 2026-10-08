@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"failforge/internal/checkers"
@@ -23,15 +24,17 @@ import (
 )
 
 type Runner struct {
-	cfg       *config.Config
-	runID     string
-	seed      int64
-	outputDir string
-	store     *store.Store
-	manager   *node.NodeManager
-	proxy     *proxy.Proxy
-	jsonlFile *os.File
-	scheduler *faults.Scheduler
+	cfg        *config.Config
+	runID      string
+	seed       int64
+	outputDir  string
+	store      *store.Store
+	manager    *node.NodeManager
+	proxy      *proxy.Proxy
+	jsonlFile  *os.File
+	scheduler  *faults.Scheduler
+	historyMu  sync.Mutex
+	historyErr error
 }
 
 func NewRunner(cfg *config.Config, overrideSeed *int64, overrideOutputDir string) (*Runner, error) {
@@ -191,6 +194,18 @@ func (r *Runner) Run(ctx context.Context) error {
 
 	// Wait briefly for cluster nodes to start and bind ports
 	time.Sleep(500 * time.Millisecond)
+	if r.cfg.Time.WarmupMs > 0 {
+		warmup := time.Duration(r.cfg.Time.WarmupMs) * time.Millisecond
+		log.Printf("[Runner] Allowing %v for node readiness and leader election before workload/faults.\n", warmup)
+		timer := time.NewTimer(warmup)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			r.cleanup(runRecord, "ABORTED")
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
 
 	// Start faults scheduler
 	r.scheduler = faults.NewScheduler(r.cfg, r.runID, r.seed, r.outputDir, r.manager, r.proxy, r.store, r.logEvent, nil)
@@ -206,6 +221,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 
 	wlGen := workload.NewGenerator(r.cfg, r.runID, r.seed, r.store, r.logEvent)
+	wlGen.OnHistoryError = r.recordHistoryError
 	wlGen.IsBlocked = r.proxy.IsBlocked
 	wlGen.GetDelay = r.proxy.GetDelay
 	wlCtx, wlCancel := context.WithTimeout(ctx, duration)
@@ -234,7 +250,7 @@ func (r *Runner) Run(ctx context.Context) error {
 
 	// 6. Cleanup & Shutdown
 	r.cleanup(runRecord, "PASSED")
-	log.Println("[Runner] Run completed successfully.")
+	log.Printf("[Runner] Run completed with status %s.\n", runRecord.Status)
 	return nil
 }
 
@@ -252,41 +268,54 @@ func (r *Runner) cleanup(runRecord *model.Run, finalStatus string) {
 
 	// Run checkers if the run was successful up to this point
 	var violationsFound bool
-	if finalStatus == "PASSED" && len(r.cfg.Checkers) > 0 {
+	if finalStatus == "PASSED" {
 		log.Println("[Runner] Running consistency and correctness invariant checkers...")
 		for _, chkCfg := range r.cfg.Checkers {
 			chk, err := checkers.GetChecker(chkCfg.Name)
 			if err != nil {
 				log.Printf("[Runner] Error getting checker '%s': %v\n", chkCfg.Name, err)
+				violationsFound = true
 				continue
 			}
 
 			violations, err := chk.Check(r.runID, r.store)
 			if err != nil {
 				log.Printf("[Runner] Checker '%s' failed: %v\n", chkCfg.Name, err)
+				violationsFound = true
 				continue
 			}
 
-			if len(violations) > 0 {
+			if r.recordCheckerViolations(runRecord, chkCfg.Name, violations) {
 				violationsFound = true
-				log.Printf("[Runner] Checker '%s' detected %d violation(s):\n", chkCfg.Name, len(violations))
-				for _, v := range violations {
-					log.Printf("  - %s: %s\n", v.Severity, v.Description)
-					violationRecord := v
-					if err := r.store.CreateViolation(&violationRecord); err != nil {
-						log.Printf("[Runner] Failed to save violation to DB: %v\n", err)
-					}
+			}
+		}
 
-					// Log Violation event to SQLite and events.jsonl
-					payloadMap := map[string]interface{}{
-						"checker_name":  v.CheckerName,
-						"severity":      v.Severity,
-						"description":   v.Description,
-						"evidence_json": v.EvidenceJSON,
-					}
-					payloadBytes, _ := json.Marshal(payloadMap)
-					r.logEvent(time.Since(runRecord.StartedAt).Milliseconds(), "Run", "Violation", string(payloadBytes))
-				}
+		minimumSuccessfulOperations := r.cfg.Workload.MinimumSuccessfulOperations
+		if minimumSuccessfulOperations == 0 && len(r.cfg.Checkers) > 0 && len(r.cfg.Workload.Operations) > 0 {
+			minimumSuccessfulOperations = 1
+		}
+		if minimumSuccessfulOperations > 0 || len(r.cfg.Workload.MinimumSuccessfulByOperation) > 0 {
+			coverage := &checkers.WorkloadCoverageChecker{
+				MinimumSuccessfulOperations:  minimumSuccessfulOperations,
+				MinimumSuccessfulByOperation: r.cfg.Workload.MinimumSuccessfulByOperation,
+			}
+			violations, err := coverage.Check(r.runID, r.store)
+			if err != nil {
+				log.Printf("[Runner] Workload coverage check failed: %v\n", err)
+				violationsFound = true
+			} else if r.recordCheckerViolations(runRecord, coverage.Name(), violations) {
+				violationsFound = true
+			}
+		}
+
+		if minimum := r.cfg.Faults.MinimumSuccessfulInjections; minimum > 0 {
+			coverage := &checkers.FaultInjectionCoverageChecker{MinimumSuccessfulInjections: minimum}
+			violations, err := coverage.Check(r.runID, r.store)
+			if err != nil {
+				log.Printf("[Runner] Fault injection coverage check failed: %v\n", err)
+				violationsFound = true
+			} else if r.recordCheckerViolations(runRecord, coverage.Name(), violations) {
+				violationsFound = true
 			}
 		}
 	}
@@ -294,6 +323,12 @@ func (r *Runner) cleanup(runRecord *model.Run, finalStatus string) {
 	if violationsFound {
 		finalStatus = "FAILED"
 	}
+	r.historyMu.Lock()
+	if r.historyErr != nil {
+		finalStatus = "CRASHED"
+		log.Printf("[Runner] Incomplete history: %v", r.historyErr)
+	}
+	r.historyMu.Unlock()
 
 	// Update run record in DB
 	endedAt := time.Now()
@@ -311,6 +346,32 @@ func (r *Runner) cleanup(runRecord *model.Run, finalStatus string) {
 		_ = r.jsonlFile.Close()
 		r.jsonlFile = nil
 	}
+}
+
+func (r *Runner) recordCheckerViolations(runRecord *model.Run, checkerName string, violations []model.Violation) bool {
+	if len(violations) == 0 {
+		return false
+	}
+	log.Printf("[Runner] Checker '%s' detected %d violation(s):\n", checkerName, len(violations))
+	for _, v := range violations {
+		log.Printf("  - %s: %s\n", v.Severity, v.Description)
+		violationRecord := v
+		if violationRecord.CheckerName == "" {
+			violationRecord.CheckerName = checkerName
+		}
+		if err := r.store.CreateViolation(&violationRecord); err != nil {
+			log.Printf("[Runner] Failed to save violation to DB: %v\n", err)
+		}
+		payloadMap := map[string]interface{}{
+			"checker_name":  violationRecord.CheckerName,
+			"severity":      violationRecord.Severity,
+			"description":   violationRecord.Description,
+			"evidence_json": violationRecord.EvidenceJSON,
+		}
+		payloadBytes, _ := json.Marshal(payloadMap)
+		r.logEvent(time.Since(runRecord.StartedAt).Milliseconds(), "Run", "Violation", string(payloadBytes))
+	}
+	return true
 }
 
 func (r *Runner) handleNodeEvent(timeMs int64, nodeID string, eventType string, payload map[string]interface{}) {
@@ -386,13 +447,25 @@ func (r *Runner) logEvent(timeMs int64, category, eventType, payloadJSON string)
 		Type:        eventType,
 		PayloadJSON: payloadJSON,
 	}
-	_ = r.store.CreateEvent(e)
+	if err := r.store.CreateEvent(e); err != nil {
+		r.recordHistoryError(err)
+	}
 
 	if r.jsonlFile != nil {
 		b, err := json.Marshal(e)
 		if err == nil {
-			_, _ = r.jsonlFile.Write(append(b, '\n'))
+			if _, err := r.jsonlFile.Write(append(b, '\n')); err != nil {
+				r.recordHistoryError(err)
+			}
 		}
+	}
+}
+
+func (r *Runner) recordHistoryError(err error) {
+	r.historyMu.Lock()
+	defer r.historyMu.Unlock()
+	if r.historyErr == nil {
+		r.historyErr = err
 	}
 }
 

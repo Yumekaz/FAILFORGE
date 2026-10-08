@@ -38,6 +38,7 @@ type NodeProcess struct {
 	Cmd        *exec.Cmd
 	CancelFunc context.CancelFunc
 	StdoutFile *os.File
+	Done       chan struct{}
 }
 
 type NodeManager struct {
@@ -153,6 +154,10 @@ func (nm *NodeManager) startNodeUnlocked(ctx context.Context, np *NodeProcess, t
 
 	// Set pgid so we can kill subprocess trees if needed
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// CommandContext's default cancellation kills only the shell. A Python
+	// child can keep listening after that shell exits and contaminate the next
+	// campaign. Cancel the owned process group while its leader is still live.
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
 
 	if err := cmd.Start(); err != nil {
 		logFile.Close()
@@ -163,6 +168,7 @@ func (nm *NodeManager) startNodeUnlocked(ctx context.Context, np *NodeProcess, t
 	np.Cmd = cmd
 	np.CancelFunc = cancel
 	np.StdoutFile = logFile
+	np.Done = make(chan struct{})
 	np.State = StateRunning
 
 	nm.onEvent(nm.getElapsedTimeMs(), np.ID, string(triggerState)+"_COMPLETED", map[string]interface{}{
@@ -177,34 +183,37 @@ func (nm *NodeManager) startNodeUnlocked(ctx context.Context, np *NodeProcess, t
 
 	// Monitor process completion in the background
 	nm.wg.Add(1)
-	go nm.monitorProcess(np)
+	go nm.monitorProcess(np, cmd, logFile, cancel, np.Done)
 
 	return nil
 }
 
-func (nm *NodeManager) monitorProcess(np *NodeProcess) {
+func (nm *NodeManager) monitorProcess(np *NodeProcess, cmd *exec.Cmd, logFile *os.File, cancel context.CancelFunc, done chan struct{}) {
 	defer nm.wg.Done()
-	err := np.Cmd.Wait()
+	err := cmd.Wait()
+	// Also contain descendants if the command's shell exits unexpectedly.
+	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	_ = logFile.Close()
+	cancel()
+	close(done)
 
 	nm.mu.Lock()
 	defer nm.mu.Unlock()
 
-	// If we closed the logfile or context, it was intentional
-	if np.StdoutFile != nil {
-		np.StdoutFile.Close()
-		np.StdoutFile = nil
+	// A previous process may finish after a replacement has started. Its
+	// cleanup must never close or cancel the replacement's resources.
+	if np.Cmd != cmd {
+		return
 	}
-	if np.CancelFunc != nil {
-		np.CancelFunc()
-		np.CancelFunc = nil
-	}
+	np.StdoutFile = nil
+	np.CancelFunc = nil
 
 	// Determine if exit was unexpected
 	if np.State == StateRunning {
 		np.State = StateCrashed
 		exitCode := -1
-		if np.Cmd.ProcessState != nil {
-			exitCode = np.Cmd.ProcessState.ExitCode()
+		if cmd.ProcessState != nil {
+			exitCode = cmd.ProcessState.ExitCode()
 		}
 		nm.onEvent(nm.getElapsedTimeMs(), np.ID, "NodeCrashed", map[string]interface{}{
 			"exit_code": exitCode,
@@ -217,13 +226,17 @@ func (nm *NodeManager) stopNodeUnlocked(np *NodeProcess) {
 	if np.State == StateRunning || np.State == StatePaused {
 		np.State = StateStopped
 		if np.Cmd != nil && np.Cmd.Process != nil {
+			pid, done := np.Cmd.Process.Pid, np.Done
 			// Kill the process group to clean up subprocesses
-			syscall.Kill(-np.Cmd.Process.Pid, syscall.SIGTERM)
+			syscall.Kill(-pid, syscall.SIGTERM)
 
 			// Wait a bit for graceful stop, otherwise kill
 			time.AfterFunc(1*time.Second, func() {
-				if np.Cmd != nil && np.Cmd.Process != nil {
-					syscall.Kill(-np.Cmd.Process.Pid, syscall.SIGKILL)
+				select {
+				case <-done:
+					return
+				default:
+					_ = syscall.Kill(-pid, syscall.SIGKILL)
 				}
 			})
 		}
@@ -265,11 +278,13 @@ func (nm *NodeManager) KillNode(nodeID string) error {
 		return fmt.Errorf("node %s is not running (state: %s)", nodeID, np.State)
 	}
 
-	np.State = StateKilled
 	if np.Cmd != nil && np.Cmd.Process != nil {
 		// Send SIGKILL to the process group
-		syscall.Kill(-np.Cmd.Process.Pid, syscall.SIGKILL)
+		if err := syscall.Kill(-np.Cmd.Process.Pid, syscall.SIGKILL); err != nil {
+			return fmt.Errorf("kill node %s: %w", nodeID, err)
+		}
 	}
+	np.State = StateKilled
 
 	if np.CancelFunc != nil {
 		np.CancelFunc()

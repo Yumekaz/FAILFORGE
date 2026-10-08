@@ -67,3 +67,48 @@ output:
 		t.Errorf("expected proxy port to be 9090, got %d", cfg.Network.ProxyPort)
 	}
 }
+
+func TestLoadConfigCoverageAndWarmupSettings(t *testing.T) {
+	content := `
+name: coverage
+time:
+  duration_ms: 10000
+  warmup_ms: 4000
+workload:
+  type: test
+  minimum_successful_operations: 20
+  minimum_successful_by_operation:
+    get: 5
+faults:
+  mode: seeded_random
+  start_after_ms: 2000
+  minimum_successful_injections: 1
+`
+	file, err := os.CreateTemp(t.TempDir(), "coverage-*.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.WriteString(content); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadConfig(file.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Time.WarmupMs != 4000 {
+		t.Fatalf("warmup_ms = %d, want 4000", cfg.Time.WarmupMs)
+	}
+	if cfg.Workload.MinimumSuccessfulOperations != 20 || cfg.Workload.MinimumSuccessfulByOperation["get"] != 5 {
+		t.Fatalf("workload coverage settings not decoded: %+v", cfg.Workload)
+	}
+	if cfg.Faults.MinimumSuccessfulInjections != 1 {
+		t.Fatalf("minimum successful injections = %d, want 1", cfg.Faults.MinimumSuccessfulInjections)
+	}
+	if cfg.Faults.StartAfterMs != 2000 {
+		t.Fatalf("fault start delay = %d, want 2000", cfg.Faults.StartAfterMs)
+	}
+}

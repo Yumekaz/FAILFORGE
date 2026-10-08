@@ -2,9 +2,9 @@ package faults
 
 import (
 	"context"
+	"failforge/internal/config"
 	"fmt"
 	"time"
-	"failforge/internal/config"
 )
 
 type StaleSnapshotRestartFault struct{}
@@ -26,16 +26,20 @@ func (f *StaleSnapshotRestartFault) Inject(ctx context.Context, fctx *FaultConte
 	snapshotIndex := fctx.Config.GetParamInt("snapshot_index", 0)
 
 	// 1. Kill node
-	_ = fctx.Manager.KillNode(node)
+	if err := fctx.Manager.KillNode(node); err != nil {
+		return fmt.Errorf("stale_snapshot_restart: kill %s: %w", node, err)
+	}
 
 	// Wait briefly for process cleanup
 	time.Sleep(500 * time.Millisecond)
 
 	// 2. List snapshots
 	snapshots, err := fctx.Manager.ListSnapshots(node)
-	if err != nil || len(snapshots) == 0 {
-		// If no snapshot exists, we just start the node back up
-		return fctx.Manager.StartNode(ctx, node)
+	if err != nil {
+		return fmt.Errorf("stale_snapshot_restart: list snapshots for %s: %w", node, err)
+	}
+	if len(snapshots) == 0 {
+		return fmt.Errorf("stale_snapshot_restart: no snapshot available for %s", node)
 	}
 
 	// Make sure snapshotIndex is in bounds

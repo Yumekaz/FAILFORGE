@@ -302,7 +302,6 @@ func GenerateHTMLTimeline(runID string, st *store.Store, runDir string) error {
 		return err
 	}
 
-
 	ops, err := st.GetOperations(runID)
 	if err != nil {
 		return err
@@ -823,7 +822,24 @@ func formatEventText(e *model.Event) string {
 		if nodeID != "" {
 			nodeStr = fmt.Sprintf(" on node %s", nodeID)
 		}
-		return fmt.Sprintf("Fault Injected: %s%s - %s", e.Type, nodeStr, e.PayloadJSON)
+		faultType := e.Type
+		if value, ok := payload["type"].(string); ok && value != "" {
+			faultType = value
+		}
+		switch e.Type {
+		case "FaultAttempted":
+			return fmt.Sprintf("Fault Attempted: %s%s - %s", faultType, nodeStr, e.PayloadJSON)
+		case "FaultInjected":
+			return fmt.Sprintf("Fault Injected: %s%s - %s", faultType, nodeStr, e.PayloadJSON)
+		case "FaultInjectionFailed":
+			if value, ok := payload["fault"].(string); ok && value != "" {
+				faultType = value
+			}
+			return fmt.Sprintf("Fault Injection Failed: %s%s - %s", faultType, nodeStr, e.PayloadJSON)
+		default:
+			// Older run histories use the fault type itself as the event type.
+			return fmt.Sprintf("Fault Injected: %s%s - %s", e.Type, nodeStr, e.PayloadJSON)
+		}
 	case "Operation":
 		opID, _ := payload["op_id"].(string)
 		clientID, _ := payload["client_id"].(string)

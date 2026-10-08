@@ -1,9 +1,15 @@
 package faults
 
 import (
+	"context"
+	"errors"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"failforge/internal/config"
+	"failforge/internal/model"
+	"failforge/internal/store"
 )
 
 func TestSchedulerDeterministicGeneration(t *testing.T) {
@@ -107,5 +113,77 @@ func TestSchedulerNestedWeights(t *testing.T) {
 		if f.Type == "" {
 			t.Errorf("expected fault type to be populated, got empty")
 		}
+	}
+}
+
+func TestSchedulerWarmupOffsetsFaultSchedule(t *testing.T) {
+	s := NewScheduler(&config.Config{
+		Time:   config.TimeConfig{WarmupMs: 2500},
+		Faults: config.FaultsConfig{StartAfterMs: 1000},
+	}, "run", 42, "", nil, nil, nil, nil, nil)
+	s.schedule = []config.FaultConfig{{AtMs: 500}, {AtMs: 3000}}
+	s.shiftScheduleForWarmup()
+	if s.schedule[0].AtMs != 4000 || s.schedule[1].AtMs != 6500 {
+		t.Fatalf("warmup-adjusted schedule = %+v", s.schedule)
+	}
+}
+
+type schedulerTestFault struct{ injectErr error }
+
+func (f *schedulerTestFault) Type() string                                { return "scheduler_test" }
+func (f *schedulerTestFault) Validate(*config.FaultConfig) error          { return nil }
+func (f *schedulerTestFault) Inject(context.Context, *FaultContext) error { return f.injectErr }
+
+func TestSchedulerRecordsAttemptAndOnlyConfirmsSuccessfulInjection(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		injectErr  error
+		wantEvents []string
+		wantWarn   int
+	}{
+		{name: "success", wantEvents: []string{"FaultAttempted", "FaultInjected"}},
+		{name: "resume failure", injectErr: errors.New("resume failed"), wantEvents: []string{"FaultAttempted", "FaultInjectionFailed"}, wantWarn: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st, err := store.NewStore(filepath.Join(t.TempDir(), "scheduler.sqlite"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer st.Close()
+			var types []string
+			onEvent := func(ms int64, category, eventType, payload string) {
+				types = append(types, eventType)
+				if err := st.CreateEvent(&model.Event{RunID: "scheduler-run", TimeMs: ms, Category: category, Type: eventType, PayloadJSON: payload}); err != nil {
+					t.Errorf("store event: %v", err)
+				}
+			}
+			registry := NewRegistry()
+			registry.Register(&schedulerTestFault{injectErr: tc.injectErr})
+			s := NewScheduler(&config.Config{}, "scheduler-run", 1, t.TempDir(), nil, nil, st, onEvent, registry)
+			s.startTime = time.Now()
+			s.injectFault(context.Background(), config.FaultConfig{Type: "scheduler_test"})
+
+			if len(types) != len(tc.wantEvents) {
+				t.Fatalf("event types = %v, want %v", types, tc.wantEvents)
+			}
+			for i := range types {
+				if types[i] != tc.wantEvents[i] {
+					t.Fatalf("event types = %v, want %v", types, tc.wantEvents)
+				}
+			}
+			violations, err := st.GetViolations("scheduler-run")
+			if err != nil {
+				t.Fatal(err)
+			}
+			warnCount := 0
+			for _, violation := range violations {
+				if violation.Severity == "warning" {
+					warnCount++
+				}
+			}
+			if warnCount != tc.wantWarn {
+				t.Fatalf("warning count = %d, want %d: %+v", warnCount, tc.wantWarn, violations)
+			}
+		})
 	}
 }

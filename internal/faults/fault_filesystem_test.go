@@ -17,6 +17,7 @@ func TestDiskWriteLossFault(t *testing.T) {
 		System: config.SystemConfig{
 			Nodes: config.NodesConfig{
 				Count:   1,
+				Command: "sleep 10",
 				Ports:   config.PortsConfig{Start: 8080},
 				DataDir: tempDir + "/data-{node_id}",
 			},
@@ -24,7 +25,6 @@ func TestDiskWriteLossFault(t *testing.T) {
 	}
 
 	nm := node.NewNodeManager(cfg, "run-1", tempDir, func(timeMs int64, nodeID string, eventType string, payload map[string]interface{}) {})
-	cfg.System.Nodes.Command = "sleep 10"
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -101,6 +101,7 @@ func TestPartialPersistenceFault(t *testing.T) {
 		System: config.SystemConfig{
 			Nodes: config.NodesConfig{
 				Count:   1,
+				Command: "sleep 10",
 				Ports:   config.PortsConfig{Start: 8080},
 				DataDir: tempDir + "/data-{node_id}",
 			},
@@ -108,7 +109,6 @@ func TestPartialPersistenceFault(t *testing.T) {
 	}
 
 	nm := node.NewNodeManager(cfg, "run-1", tempDir, func(timeMs int64, nodeID string, eventType string, payload map[string]interface{}) {})
-	cfg.System.Nodes.Command = "sleep 10"
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -169,6 +169,7 @@ func TestStaleSnapshotRestartFault(t *testing.T) {
 		System: config.SystemConfig{
 			Nodes: config.NodesConfig{
 				Count:   1,
+				Command: "sleep 10",
 				Ports:   config.PortsConfig{Start: 8080},
 				DataDir: tempDir + "/data-{node_id}",
 			},
@@ -176,7 +177,6 @@ func TestStaleSnapshotRestartFault(t *testing.T) {
 	}
 
 	nm := node.NewNodeManager(cfg, "run-1", tempDir, func(timeMs int64, nodeID string, eventType string, payload map[string]interface{}) {})
-	cfg.System.Nodes.Command = "sleep 10"
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 

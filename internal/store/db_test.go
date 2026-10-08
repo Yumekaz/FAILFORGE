@@ -1,13 +1,49 @@
 package store
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
 	"failforge/internal/model"
 )
+
+func TestConcurrentHistoryIsComplete(t *testing.T) {
+	st, err := NewStore(filepath.Join(t.TempDir(), "history.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	const count = 100
+	var wg sync.WaitGroup
+	errors := make(chan error, count*2)
+	for i := 0; i < count; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			errors <- st.CreateOperation(&model.Operation{OpID: fmt.Sprintf("op-%d", i), RunID: "parallel", Operation: "PUT", Status: "ok"})
+			errors <- st.CreateEvent(&model.Event{RunID: "parallel", Category: "Operation", Type: "OperationCompleted"})
+		}(i)
+	}
+	wg.Wait()
+	close(errors)
+	for err := range errors {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	ops, err := st.GetOperations("parallel")
+	if err != nil || len(ops) != count {
+		t.Fatalf("operations=%d error=%v", len(ops), err)
+	}
+	events, err := st.GetEvents("parallel")
+	if err != nil || len(events) != count {
+		t.Fatalf("events=%d error=%v", len(events), err)
+	}
+}
 
 func TestStoreOperations(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "failforge-db-test-*")

@@ -3,8 +3,9 @@ name: coordination-service-test
 seed: 42
 
 time:
-  duration_ms: 10000
+  duration_ms: 30000
   tick_ms: 10
+  warmup_ms: 8000
 
 system:
   type: process_cluster
@@ -12,19 +13,25 @@ system:
     count: 3
     # Portable: run from FAILFORGE repo root. Override with COORD_ROOT if the
     # sibling checkout is not at ../Coordination-service.
-    command: "COORD_PORT={port} COORD_NODE_ID={node_id} COORD_DB_PATH=.failforge/data/{run_id}/{node_id}.db COORD_PEER_URLS=http://localhost:9000/node-1,http://localhost:9000/node-2,http://localhost:9000/node-3 COORD_ADVERTISE_URL=http://localhost:9000/{node_id} COORD_REPLICATION_TOKEN=${COORD_REPLICATION_TOKEN:-failforge-local-seed42} COORD_REQUIRE_WRITE_QUORUM=true COORD_CLUSTER_ROLE=follower COORD_ELECTION_TIMEOUT=1.5 COORD_HEARTBEAT_INTERVAL=0.3 python3 \"${COORD_ROOT:-../Coordination-service}/main.py\""
+    command: "COORD_PORT={port} COORD_NODE_ID={node_id} COORD_DB_PATH=.failforge/data/{run_id}/{node_id}.db COORD_PEER_URLS={proxy_url}/node-1,{proxy_url}/node-2,{proxy_url}/node-3 COORD_ADVERTISE_URL={proxy_url}/{node_id} COORD_REPLICATION_TOKEN=${COORD_REPLICATION_TOKEN:-failforge-local-seed42} COORD_REQUIRE_WRITE_QUORUM=true COORD_CLUSTER_ROLE=follower COORD_ELECTION_TIMEOUT=1.5 COORD_HEARTBEAT_INTERVAL=0.3 python3 \"${COORD_ROOT:-../Coordination-service}/main.py\""
     ports:
-      start: 8000
+      start: 25000
     data_dir: ".failforge/data/{run_id}/{node_id}"
 
 network:
   mode: controlled_proxy
-  proxy_port: 9000
+  proxy_port: 25090
 
 workload:
   type: coordination-service
   clients: 3
-  duration_ms: 8000
+  duration_ms: 30000
+  minimum_successful_operations: 50
+  minimum_successful_by_operation:
+    lock: 5
+    unlock: 5
+    put: 5
+    get: 5
   keys: [lock-a, lock-b, data-x]
   operations:
     lock:
@@ -38,6 +45,8 @@ workload:
 
 faults:
   mode: seeded_random
+  start_after_ms: 5000
+  minimum_successful_injections: 1
   profile:
     max_faults: 3
     kill_node:
@@ -52,4 +61,4 @@ checkers:
   - name: no_two_leaders
 
 output:
-  dir: "runs/coordination-{seed}"
+  dir: "runs/coordination-{seed}-{run_id}"

@@ -2,9 +2,14 @@ package node
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"failforge/internal/config"
 )
@@ -92,4 +97,81 @@ func TestNodeManagerLifecycle(t *testing.T) {
 	if err := nm.StopAll(); err != nil {
 		t.Fatalf("failed to stop all: %v", err)
 	}
+}
+
+func TestOldGenerationCleanupCannotKillReplacement(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := &config.Config{System: config.SystemConfig{Nodes: config.NodesConfig{
+		Count: 1, Command: "sleep 10", DataDir: filepath.Join(tmp, "data-{node_id}"),
+	}}}
+	nm := NewNodeManager(cfg, "replacement", tmp, func(int64, string, string, map[string]interface{}) {})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	defer nm.StopAll()
+	if err := nm.StartNode(ctx, "node-1"); err != nil {
+		t.Fatal(err)
+	}
+	nm.mu.Lock()
+	np := nm.nodes["node-1"]
+	nm.stopNodeUnlocked(np)
+	if err := nm.startNodeUnlocked(ctx, np, StateRestarting); err != nil {
+		nm.mu.Unlock()
+		t.Fatal(err)
+	}
+	replacementPID := np.Cmd.Process.Pid
+	nm.mu.Unlock()
+	time.Sleep(1200 * time.Millisecond)
+	if nm.GetNodesStatus()["node-1"] != StateRunning {
+		t.Fatal("old monitor changed replacement state")
+	}
+	if err := syscall.Kill(replacementPID, 0); err != nil {
+		t.Fatalf("replacement was killed by old cleanup: %v", err)
+	}
+}
+
+func TestStopAllContainsTermIgnoringDescendant(t *testing.T) {
+	tmp := t.TempDir()
+	pidFile := filepath.Join(tmp, "child.pid")
+	cfg := &config.Config{System: config.SystemConfig{Nodes: config.NodesConfig{
+		Count: 1, Command: "sh -c 'trap \"\" TERM; sleep 30' & echo $! > " + pidFile + "; wait",
+		DataDir: filepath.Join(tmp, "data-{node_id}"),
+	}}}
+	nm := NewNodeManager(cfg, "descendant", tmp, func(int64, string, string, map[string]interface{}) {})
+	defer nm.StopAll()
+	if err := nm.StartAll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var childPID int
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile(pidFile)
+		if err == nil {
+			childPID, _ = strconv.Atoi(strings.TrimSpace(string(data)))
+			if childPID > 0 {
+				break
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if childPID == 0 {
+		t.Fatal("descendant did not start")
+	}
+	if err := nm.StopAll(); err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", childPID))
+		if os.IsNotExist(err) {
+			return
+		}
+		if err == nil {
+			fields := strings.Fields(string(data))
+			if len(fields) > 2 && fields[2] == "Z" {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("descendant survived StopAll and could contaminate the next campaign")
 }

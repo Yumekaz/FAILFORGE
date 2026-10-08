@@ -1,0 +1,82 @@
+name: Verification
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Full framework suite
+        run: |
+          mkdir -p verification
+          set -o pipefail
+          go test ./... -count=1 -timeout 12m -json | tee verification/unit.jsonl
+      - name: Build CLI
+        run: go build -o verification/failforge ./cmd/failforge
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: failforge-unit
+          path: verification/unit.jsonl
+  first-party-campaigns:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: FAILFORGE
+      - name: Read tested target revisions
+        id: targets
+        working-directory: FAILFORGE
+        run: |
+          for target in MiniDB Coordination; do
+            revision=$(awk -v target="$target" '$1==target {print $2}' targets.lock)
+            [[ "$revision" =~ ^[0-9a-f]{40}$ ]]
+            echo "$target=$revision" >> "$GITHUB_OUTPUT"
+          done
+      - uses: actions/checkout@v4
+        with:
+          repository: Yumekaz/Mini-Redis-Cassandra
+          ref: ${{ steps.targets.outputs.MiniDB }}
+          path: Mini-Redis-Cassandra
+      - uses: actions/checkout@v4
+        with:
+          repository: Yumekaz/Coordination-service
+          ref: ${{ steps.targets.outputs.Coordination }}
+          path: Coordination-service
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: FAILFORGE/go.mod
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r Coordination-service/requirements.txt
+      - name: Execute covered first-party campaigns
+        working-directory: FAILFORGE
+        run: |
+          set -euo pipefail
+          mkdir -p verification
+          go build -o verification/failforge ./cmd/failforge
+          for seed in 42 43; do
+            verification/failforge run failforge_minidb.yml --seed "$seed" > "verification/minidb-$seed.log" 2>&1
+          done
+          verification/failforge run failforge_coordination_baseline.yml --seed 42 > verification/coordination-baseline.log 2>&1
+          for seed in 42 43; do
+            verification/failforge run failforge_coordination.yml --seed "$seed" > "verification/coordination-$seed.log" 2>&1
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: failforge-covered-campaigns
+          path: |
+            FAILFORGE/verification/*.log
+            FAILFORGE/runs/

@@ -5,26 +5,31 @@ name: mini-redis-cassandra-test
 seed: 42
 
 time:
-  duration_ms: 10000
+  duration_ms: 30000
   tick_ms: 10
+  warmup_ms: 5000
 
 system:
   type: process_cluster
   nodes:
     count: 3
-    command: "PYTHONPATH=\"${MINIDB_ROOT:-../Mini-Redis-Cassandra}\" NODE_ID={node_id} PROXY_PORT=9000 START_PORT=7001 python3 -m minidb.main --node-id {node_id} --port {port} --cluster-port $(( {port} + 1000 )) --peers localhost:8001,localhost:8002,localhost:8003 --data-dir .failforge/data/{run_id}/{node_id} --consistency ALL"
+    command: "exec env PYTHONPATH=\"${MINIDB_ROOT:-../Mini-Redis-Cassandra}\" NODE_ID={node_id} PROXY_PORT=29000 START_PORT=27001 python3 -m minidb.main --node-id {node_id} --port {port} --cluster-port $(( {port} + 1000 )) --peers localhost:28001,localhost:28002,localhost:28003 --data-dir .failforge/data/{run_id}/{node_id} --consistency ALL"
     ports:
-      start: 7001
+      start: 27001
     data_dir: ".failforge/data/{run_id}/{node_id}"
 
 network:
   mode: controlled_proxy
-  proxy_port: 9000
+  proxy_port: 29000
 
 workload:
   type: mini-redis-cassandra
   clients: 3
-  duration_ms: 8000
+  duration_ms: 30000
+  minimum_successful_operations: 50
+  minimum_successful_by_operation:
+    put: 10
+    get: 20
   keys: [x, y, z]
   operations:
     put:
@@ -34,6 +39,8 @@ workload:
 
 faults:
   mode: seeded_random
+  start_after_ms: 5000
+  minimum_successful_injections: 1
   profile:
     max_faults: 3
     kill_node:
@@ -48,4 +55,4 @@ checkers:
   - name: no_two_leaders
 
 output:
-  dir: "runs/minidb-{seed}"
+  dir: "runs/minidb-{seed}-{run_id}"

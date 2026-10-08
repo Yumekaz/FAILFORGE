@@ -3,7 +3,6 @@ package checkers
 import (
 	"encoding/json"
 	"fmt"
-	"sort"
 	"strings"
 
 	"failforge/internal/model"
@@ -27,17 +26,13 @@ func (c *ReadAfterWriteChecker) Check(runID string, st *store.Store) ([]model.Vi
 	getOpsByKey := make(map[string][]*model.Operation)
 
 	for _, op := range ops {
-		if op.Status != "ok" {
-			continue
-		}
-
 		opType := strings.ToLower(op.Operation)
 		if opType == "put" {
 			key := getKeyFromInput(op.InputJSON)
 			if key != "" {
 				putOpsByKey[key] = append(putOpsByKey[key], op)
 			}
-		} else if opType == "get" {
+		} else if opType == "get" && op.Status == "ok" {
 			key := getKeyFromInput(op.InputJSON)
 			if key != "" {
 				getOpsByKey[key] = append(getOpsByKey[key], op)
@@ -64,79 +59,54 @@ func (c *ReadAfterWriteChecker) Check(runID string, st *store.Store) ([]model.Vi
 			continue
 		}
 
-		// Sort puts by EndMs (completion time)
-		sort.Slice(puts, func(i, j int) bool {
-			return puts[i].EndMs < puts[j].EndMs
-		})
-
-		// Map of value to its index in the puts chronological sequence
-		valueIdx := make(map[string]int)
-		for idx, put := range puts {
-			val := getValueFromInput(put.InputJSON)
-			valueIdx[val] = idx
-		}
-
 		for _, get := range gets {
 			getStart := get.StartMs
 			getVal := getBodyFromOutput(get.OutputJSON)
-
-			// 1. If the read value is not null/empty, check if it was ever written
-			if getVal != "null" && getVal != "" {
-				if _, exists := valueIdx[getVal]; !exists {
-					violations = append(violations, model.Violation{
-						RunID:        runID,
-						CheckerName:  c.Name(),
-						Severity:     "ERROR",
-						Description:  fmt.Sprintf("Corrupt read on key '%s': GET returned value '%s' which was never successfully written", key, getVal),
-						EvidenceJSON: fmt.Sprintf(`{"get_op_id":"%s","actual_value":"%s"}`, get.OpID, getVal),
-					})
-					continue
+			var acknowledgedBefore []*model.Operation
+			var candidates []*model.Operation
+			for _, put := range puts {
+				if put.Status == "ok" && put.EndMs <= getStart {
+					acknowledgedBefore = append(acknowledgedBefore, put)
+				}
+				if put.StartMs <= get.EndMs && getValueFromInput(put.InputJSON) == getVal {
+					candidates = append(candidates, put)
 				}
 			}
-
-			// Find the latest PUT that completed before this GET started
-			var latestPutBeforeGet *model.Operation
-			latestPutIdx := -1
-			for idx, put := range puts {
-				if put.EndMs <= getStart {
-					latestPutBeforeGet = put
-					latestPutIdx = idx
+			nullRead := getVal == "null" || getVal == ""
+			reason := ""
+			if nullRead && len(acknowledgedBefore) != 0 {
+				reason = "returned no value after an acknowledged write"
+			} else if !nullRead && len(candidates) == 0 {
+				reason = "returned a value with no preceding or overlapping write attempt"
+			} else if !nullRead {
+				validCandidate := false
+				for _, candidate := range candidates {
+					// A failed write can partially apply or complete after timeout.
+					// Its effect is indeterminate, not proof of corrupted data.
+					if candidate.Status != "ok" {
+						validCandidate = true
+						break
+					}
+					orderedBeforeNewerWrite := false
+					for _, newer := range acknowledgedBefore {
+						if candidate.EndMs < newer.StartMs {
+							orderedBeforeNewerWrite = true
+							break
+						}
+					}
+					if !orderedBeforeNewerWrite {
+						validCandidate = true
+						break
+					}
+				}
+				if !validCandidate {
+					reason = "returned an older write superseded by a non-overlapping acknowledged write"
 				}
 			}
-
-			// If no PUT completed before GET started, GET can return anything (e.g. null, concurrent PUT value, or initial state)
-			if latestPutBeforeGet == nil {
-				continue
-			}
-
-			expectedVal := getValueFromInput(latestPutBeforeGet.InputJSON)
-
-			// If the GET returned null, but a PUT already completed, it's a violation!
-			if getVal == "null" || getVal == "" {
-				violations = append(violations, model.Violation{
-					RunID:       runID,
-					CheckerName: c.Name(),
-					Severity:    "ERROR",
-					Description: fmt.Sprintf("Stale read on key '%s': GET started at %dms returned '%s' after PUT value '%s' completed at %dms",
-						key, getStart, getVal, expectedVal, latestPutBeforeGet.EndMs),
-					EvidenceJSON: fmt.Sprintf(`{"get_op_id":"%s","get_start_ms":%d,"expected_put_op_id":"%s","expected_value":"%s","actual_value":"%s"}`,
-						get.OpID, getStart, latestPutBeforeGet.OpID, expectedVal, getVal),
-				})
-				continue
-			}
-
-			// Linearizability condition: read index must be equal or newer than the latest completed write index
-			readIdx := valueIdx[getVal]
-			if readIdx < latestPutIdx {
-				violations = append(violations, model.Violation{
-					RunID:       runID,
-					CheckerName: c.Name(),
-					Severity:    "ERROR",
-					Description: fmt.Sprintf("Read-After-Write violation on key '%s': GET returned stale value '%s' (write #%d) but write '%s' (write #%d) already completed at %dms",
-						key, getVal, readIdx+1, expectedVal, latestPutIdx+1, latestPutBeforeGet.EndMs),
-					EvidenceJSON: fmt.Sprintf(`{"get_op_id":"%s","get_start_ms":%d,"actual_value":"%s","actual_write_index":%d,"expected_value":"%s","expected_write_index":%d}`,
-						get.OpID, getStart, getVal, readIdx+1, expectedVal, latestPutIdx+1),
-				})
+			if reason != "" {
+				evidence, _ := json.Marshal(map[string]interface{}{"get_op_id": get.OpID, "get_start_ms": getStart, "actual_value": getVal})
+				violations = append(violations, model.Violation{RunID: runID, CheckerName: c.Name(), Severity: "ERROR",
+					Description: fmt.Sprintf("Read-After-Write violation on key %q: GET %s (%q)", key, reason, getVal), EvidenceJSON: string(evidence)})
 			}
 		}
 	}
