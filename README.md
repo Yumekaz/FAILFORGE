@@ -1,189 +1,135 @@
 # FailForge
 
-**A local deterministic failure testing lab for controlled distributed systems.**
+[![Verification](https://github.com/Yumekaz/FAILFORGE/actions/workflows/verification.yml/badge.svg)](https://github.com/Yumekaz/FAILFORGE/actions/workflows/verification.yml)
 
-FailForge is a local failure testing framework designed for distributed key-value stores, coordination engines, and consensus protocols. By routing all client-to-node and node-to-node traffic through a reverse proxy and using process group signaling, FailForge can inject seeded or scripted faults (such as network partitions, clock skews, crashes, packet corruption, and disk failures) deterministically, detect correctness violations, and use delta debugging to isolate the minimal sequence of events that triggers a bug.
+**A local fault-injection framework for finding and reproducing distributed-system failures.**
 
----
+FailForge starts process clusters, drives HTTP workloads, schedules faults, records execution histories and checks invariants. Failed campaigns can be replayed and minimized; terminal, Mermaid and HTML timelines make the fault/operation sequence inspectable.
 
-## Why FailForge Exists
+Seeds reproduce **generated fault schedules**, not an identical OS-level execution. Process scheduling, I/O and network timing can still vary.
 
-Distributed systems are notoriously difficult to test. Transient bugs like split-brain, lost acknowledged writes, and read-after-write violations often require a precise interleaving of network delays and process crashes to manifest.
+## What it does
 
-FailForge brings deterministic chaos testing to local development. It is designed to bridge the gap between simple unit tests and heavyweight, production chaos frameworks (like Jepsen). It allows you to:
-1. **Coordinate Local Nodes**: Spin up multi-node process clusters locally.
-2. **Control the Network**: Intercept all node communications via an HTTP reverse proxy.
-3. **Inject Seeded Chaos**: Generate deterministic fault schedules from a single seed.
-4. **Isolate Bugs via Delta Debugging**: Automatically minimize fault schedules, operation count, and runtimes using delta debugging (DDMin) to isolate root causes.
-5. **Visualize Timelines**: Analyze failures using colorized terminal prints, Mermaid sequence diagrams, and interactive, self-contained HTML dashboards.
+- Launches local nodes in separate process groups.
+- Routes participating HTTP requests through a controlled proxy.
+- Injects seeded or scripted process, network, filesystem and cooperative clock faults.
+- Records fault attempts, confirmed injections, failures and workload outcomes.
+- Checks acknowledged-write visibility, lock exclusivity and leader uniqueness where configured.
+- Replays and minimizes failing histories rather than treating every failure as unexplained noise.
 
-### What FailForge is Not
-* **Not a Production Chaos Tool**: FailForge is designed for local developer-first simulation testing, not for running chaos in live Kubernetes or production cloud environments.
-* **Not an Arbitrary Packet Interceptor**: It relies on HTTP reverse proxying and cooperative node headers, avoiding complex, low-level TCP raw socket manipulation.
-* **Not a Formal Verifier**: It runs state-based invariant checking over execution histories rather than mathematically proving correctness.
+It is a controlled local testing tool, not a production chaos service, raw TCP interceptor or formal verifier.
 
----
+## Quick start
 
-## Supported Faults & Invariants
+Requirements: Go **1.26.4 or a compatible newer toolchain**, Python 3 for the bundled example node, and a local host supporting the configured process signals. Use disposable target data directories.
 
-FailForge comes with a polymorphic fault engine supporting **15 distinct network, process, filesystem, and logical faults**:
-
-| Category | Type | Parameter Description |
-|---|---|---|
-| **Process** | `kill_node` | Abruptly terminates a node using SIGKILL. |
-| | `restart_node` | Terminates and safely restarts a node. |
-| | `cpu_pause` | Simulates GC pauses/stalls by suspending nodes using SIGSTOP/SIGCONT. |
-| | `slow_disk` | Simulates disk stalls by cycling nodes through micro-suspensions. |
-| **Network** | `partition` | Creates symmetric network partitions between groups of nodes. |
-| | `asymmetric_partition` | Sets up a one-way partition (A cannot send to B, but B can send to A). |
-| | `delay_messages` | Injects message latency between selected endpoints. |
-| | `drop_messages` | Drops messages between selected endpoints. |
-| | `duplicate_messages` | Delivers clone requests of messages. |
-| | `corrupt_messages` | Randomly flips bits in HTTP request bodies at a custom rate. |
-| | `heal` | Clears all active partitions, drops, delays, duplications, and corruptions. |
-| **Filesystem** | `disk_write_loss` | Crashes a node and truncates files modified within a window to 0 bytes. |
-| | `partial_persistence` | Crashes a node and truncates its newest file to 50%–90% of its size. |
-| | `stale_snapshot_restart` | Reverts a node's data directory to an older automatically saved snapshot. |
-| **Logical** | `clock_skew` | Injects virtual clock drift on messages via headers. |
-
-### Supported Correctness Checkers
-* **`read_after_acknowledged_write`**: Detects missing acknowledged values, values with no preceding/overlapping write attempt, and definitely stale values ordered before a newer acknowledged write. Overlapping writes are not ordered merely by response arrival. Failed/timed-out writes may partially apply; their effect is indeterminate. This checker is not a complete linearizability proof.
-
----
-
-## Architecture
-
-```
-                      +-------------------+
-                      |   Client Workload |
-                      +---------+---------+
-                                | (HTTP / Proxy Routing)
-                                v
-                      +---------+---------+
-                      |  FailForge Proxy  |<----+ Intercepts, Delays,
-                      +---------+---------+     | Drops, & Duplicates
-                                |               | Messages
-                                v               |
-              +-----------------+-----------------+
-              |                 |                 |
-              v                 v                 v
-        +-----------+     +-----------+     +-----------+
-        |  Node-1   |     |  Node-2   |     |  Node-3   |
-        +-----+-----+     +-----+-----+     +-----+-----+
-              |                 |                 |
-              +---------------->+---------------->+ (Node-to-Node Reverse Proxy)
-```
-
-1. **Runner**: Coordinates the lifecycle of the simulation, orchestrating the workload, scheduler, proxy, and checkers.
-2. **NodeManager**: Declares and spawns local processes under separate process groups to prevent subprocess leakage.
-3. **Proxy**: Acts as the reverse proxy. All client-to-node and node-to-node HTTP requests are intercepted to check rules (e.g. partition drops, corruption rates).
-4. **Scheduler**: Translates a pseudorandom seed (or scripted YAML timeline) into a deterministic queue of fault injections.
-
----
-
-## Quickstart
-
-### Prerequisites
-* Go 1.21+
-* python3 (for the default toy-kv example node)
-
-### 1. Build the Binary
 ```bash
+git clone https://github.com/Yumekaz/FAILFORGE.git
+cd FAILFORGE
+mkdir -p bin
 go build -o bin/failforge ./cmd/failforge
-```
-
-### 2. Run a Seeded Chaos Campaign
-Run a single simulation run using the default config:
-```bash
 ./bin/failforge run failforge.yml --seed 42
 ```
 
-### 3. Minimize a Failed Run
-If a run fails due to an invariant violation, minimize it to find the simplest reproduction:
-```bash
-./bin/failforge minimize runs/42
-```
-This automatically prunes unnecessary client operations, fault schedules, and runtimes.
-
-### 4. View the Interactive Timeline
-Generate and open the interactive dashboard for a run:
-```bash
-./bin/failforge timeline runs/42 --html
-```
-This generates `runs/42/timeline.html`. Open it in any web browser to view the chronological logs, CSS stats cards, and the Mermaid sequence diagram.
-
----
-
-## First-party targets (this portfolio)
-
-FailForge ships YAML adapters for two systems in the same Desktop stack as **Cairn**:
-
-| Target | Config | Seed demo | Notes |
-| --- | --- | --- | --- |
-| **MiniDB** (Mini-Redis-Cassandra) | `failforge_minidb.yml` | `./bin/failforge run failforge_minidb.yml --seed 42` | Sibling `../Mini-Redis-Cassandra` or `MINIDB_ROOT`. Checker: `read_after_acknowledged_write`. |
-| **Coordination-service** | `failforge_coordination.yml` | `./bin/failforge run failforge_coordination.yml --seed 42` | Prefer sibling path / `COORD_ROOT`. Checkers: `lock_exclusivity`, `no_two_leaders`. |
-
-**Proof link (MiniDB):** FailForge seed 42 exposed QUORUM write + ANY-read stale/corrupt violations; fixes and residual notes are in the MiniDB postmortem:  
-[2026-07-failforge-seed42-raw.md](https://github.com/Yumekaz/Mini-Redis-Cassandra/blob/main/docs/postmortems/2026-07-failforge-seed42-raw.md)
-
-The first-party profiles now allow a node-settle window and require minimum
-successful workload operations plus at least one completed fault injection.
-
-The 2026-10-08 retained acceptance matrix passed MiniDB seeds 42/43 and Coordination's no-fault baseline plus seeds 42/43. MiniDB campaigns use ports 27001–27003 and proxy 29000; Coordination uses ports 25000–25002 and proxy 25090. Workload values identify individual write attempts, and node cancellation targets its process group so leftover children cannot silently contaminate the following run. Preserve the seed, full history, source revision/patch and coverage result when interpreting a pass.
-Timelines distinguish `FaultAttempted`, `FaultInjected`, and
-`FaultInjectionFailed`; a request that never produced successful workload or
-fault evidence is not reported as a passing campaign. Each run uses its own
-run-ID output directory so a new seed run does not replace older evidence.
-
-Stack map (Cairn ↔ Mini-Docker ↔ DuraFlow ↔ FailForge): see [Cairn `docs/STACK.md`](https://github.com/Yumekaz/Cairn/blob/main/docs/STACK.md).
-
----
-
-## Writing an Adapter
-
-To test your own distributed key-value store, database, or coordination engine, configure it using a YAML file:
+The default configuration uses `runs/42` for this seed. The command prints the actual output directory and returns nonzero if its checks fail. For repeated attempts that must not share that directory, change the YAML output to:
 
 ```yaml
-name: my-distributed-db-test
-seed: 12345
-time:
-  duration_ms: 15000
-  tick_ms: 10
-system:
-  type: process_cluster
-  nodes:
-    count: 3
-    # FailForge starts nodes using command placeholders:
-    command: "./bin/my-db --id {node_id} --port {port} --proxy-url {proxy_url} --data-dir {data_dir}"
-    ports:
-      start: 8000
-    data_dir: "/tmp/my-db/{node_id}"
-network:
-  mode: proxy
-  proxy_port: 9000
-workload:
-  type: kv-register
-  clients: 2
-  duration_ms: 10000
-  keys: [x]
-  operations:
-    put: { weight: 5 }
-    get: { weight: 5 }
-checkers:
-  - name: read_after_acknowledged_write
 output:
-  dir: "runs/{seed}"
+  dir: "runs/{seed}-{run_id}"
 ```
 
-### Node Cooperative Guidelines
-To get the most out of advanced network faults:
-1. **Clock Skew**: Nodes should extract the `X-FailForge-Clock-Offset` header from incoming HTTP requests and apply it to their virtual clock to test time-drift bugs.
-2. **Reverse Proxying**: Make sure node-to-node requests are sent via the proxy URL (passed dynamically using `{proxy_url}`) using the `X-FailForge-From` and `X-FailForge-To` headers to route traffic correctly.
+Inspect the printed run directory:
 
----
+```bash
+./bin/failforge report "<run-directory>"
+./bin/failforge timeline "<run-directory>"
+./bin/failforge timeline "<run-directory>" --html
+./bin/failforge minimize "<failed-run-directory>"
+```
 
-## Limitations
+The HTML timeline is written to `<run-directory>/timeline.html`. Its history and styling are bundled; Mermaid rendering currently loads a CDN script, so fully offline diagram rendering is not guaranteed.
 
-* **Single Host**: Nodes must be runnable as local subprocesses on the same machine.
-* **HTTP/HTTP2 Only**: Network fault interception is implemented via reverse proxying HTTP requests. Raw TCP socket interception is not supported.
-* **Cooperative Clock Skew**: Process clock skew relies on the application reading the custom HTTP header rather than operating system level time namespace virtualization.
+## Architecture
+
+```mermaid
+flowchart TD
+    Config["YAML configuration and seed"] --> Runner["Campaign runner"]
+    Runner --> Nodes["Process-group node manager"]
+    Runner --> Workload["Client workload"]
+    Runner --> Scheduler["Fault scheduler"]
+    Workload --> Proxy["Controlled HTTP proxy"]
+    Proxy --> Nodes
+    Nodes -->|Cooperating peer traffic| Proxy
+    Scheduler --> Proxy
+    Scheduler -->|Signals and disposable data faults| Nodes
+    Runner --> History[("SQLite operation and fault history")]
+    History --> Checkers["Coverage requirements and invariant checkers"]
+    History --> Reports["Replay, minimization and timelines"]
+```
+
+Only traffic actually sent through the proxy is intercepted. Node-to-node routing and virtual clock skew require cooperation from the target adapter.
+
+## Fault catalog
+
+| Category | Types |
+| --- | --- |
+| Process | kill_node, restart_node, cpu_pause, slow_disk |
+| Network | partition, asymmetric_partition, delay_messages, drop_messages, duplicate_messages, corrupt_messages, heal |
+| Filesystem | disk_write_loss, partial_persistence, stale_snapshot_restart |
+| Logical | clock_skew |
+
+`cpu_pause` uses SIGSTOP/SIGCONT. `slow_disk` approximates stalls through process pauses; it is not block-device latency emulation. Filesystem faults can truncate or replace target data. Never point a campaign at unrelated files or a live production data directory.
+
+## Interpret a result
+
+A meaningful campaign needs successful operations and evidence that the intended fault actually happened. First-party fault profiles require both; requesting an injection is not sufficient.
+
+Timeline events distinguish:
+
+- `FaultAttempted`: an injection was requested.
+- `FaultInjected`: the injector confirmed successful execution.
+- `FaultInjectionFailed`: the injection or later fault operation failed.
+
+The `read_after_acknowledged_write` checker accounts for overlapping write attempts and indeterminate failed writes. It does not impose response-arrival order on concurrent writes or claim complete linearizability verification. Failed/time-out writes may have partially applied.
+
+Keep the seed, configuration, source revisions, operation history, fault evidence and coverage result together. Preserve intermittent failures and rerun their saved reproduction; a passing seed does not prove every schedule safe.
+
+## First-party targets
+
+| Target | Profile | Coverage |
+| --- | --- | --- |
+| [MiniDB](https://github.com/Yumekaz/Mini-Redis-Cassandra) | failforge_minidb.yml | Acknowledged-write/read behavior |
+| [Coordination-service](https://github.com/Yumekaz/Coordination-service) | failforge_coordination.yml | Lock exclusivity and leader uniqueness |
+| Coordination baseline | failforge_coordination_baseline.yml | Successful operations without injected faults |
+
+Use sibling checkouts, or configure `MINIDB_ROOT` / `COORD_ROOT` as supported by the profiles. Coordination needs its Python requirements installed.
+
+```bash
+./bin/failforge run failforge_minidb.yml --seed 42
+./bin/failforge run failforge_coordination_baseline.yml --seed 42
+./bin/failforge run failforge_coordination.yml --seed 42
+```
+
+These profiles include `{run_id}` in their output/data directories; this is different from the bundled default's `runs/{seed}` layout. Their ports are configured independently to avoid cross-campaign fixture contamination.
+
+## Write an adapter
+
+Start with a [first-party profile](failforge_minidb.yml) and adapt:
+
+1. The process command, node count, private ports and disposable data directory.
+2. The workload's HTTP contract and applicable checkers.
+3. Cooperative peer routing through `X-FailForge-From` / `X-FailForge-To`.
+4. Virtual time handling through `X-FailForge-Clock-Offset`, if clock faults are used.
+5. Successful-operation and confirmed-fault requirements.
+
+The framework does not automatically intercept arbitrary protocols or turn an unmodified application into a clock-skew-aware target.
+
+## Verification
+
+```bash
+go test ./...
+```
+
+The required [Verification workflow](.github/workflows/verification.yml) builds the CLI, runs the framework suite and exercises pinned first-party targets: MiniDB seeds 42/43, Coordination's baseline and Coordination seeds 42/43. Covered local acceptance results are recorded in [Cairn's validation record](https://github.com/Yumekaz/Cairn/blob/main/docs/VALIDATION_2026-10.md).
+
+[targets.lock](targets.lock) identifies the target source revisions used by CI. FailForge is connected to the [Cairn stack](https://github.com/Yumekaz/Cairn/blob/main/docs/STACK.md) as a verification project, not a production runtime dependency.
