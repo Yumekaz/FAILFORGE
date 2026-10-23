@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -37,16 +38,8 @@ var campaignCmd = &cobra.Command{
 		}
 
 		// Handle OS interrupts gracefully (Ctrl+C)
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer cancel()
-
-		sigChan := make(chan os.Signal, 1)
-		signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
-		go func() {
-			<-sigChan
-			fmt.Println("\nReceived interrupt. Stopping campaign...")
-			cancel()
-		}()
 
 		fmt.Printf("Starting FailForge campaign mode...\n")
 		fmt.Printf("Config File: %s\n", configPath)
@@ -74,9 +67,10 @@ var campaignCmd = &cobra.Command{
 		fmt.Printf("Report File: %s/campaign_report.md\n", res.OutputDir)
 		fmt.Println("==================================================")
 
-		if res.Failed > 0 {
+		if res.Passed != res.TotalSeeds || res.StoppedEarly || res.Failed > 0 || res.Crashed > 0 || res.Aborted > 0 {
 			// Red warning for failed campaign
 			fmt.Printf("\033[1;31m[CAMPAIGN FAILED] %d seeds failed! Check the report for replay commands.\033[0m\n", res.Failed)
+			return fmt.Errorf("campaign did not pass: passed=%d/%d failed=%d crashed=%d aborted=%d", res.Passed, res.TotalSeeds, res.Failed, res.Crashed, res.Aborted)
 		} else {
 			// Green success for passed campaign
 			fmt.Println("\033[1;32m[CAMPAIGN PASSED] All seeds completed successfully!\033[0m")
@@ -91,14 +85,16 @@ func parseSeeds(seedsStr string) (int64, int64, error) {
 	if len(parts) != 2 {
 		return 0, 0, fmt.Errorf("invalid seeds format, expected START..END (e.g. 1..100)")
 	}
-	var start, end int64
-	_, err1 := fmt.Sscanf(parts[0], "%d", &start)
-	_, err2 := fmt.Sscanf(parts[1], "%d", &end)
+	start, err1 := strconv.ParseInt(parts[0], 10, 64)
+	end, err2 := strconv.ParseInt(parts[1], 10, 64)
 	if err1 != nil || err2 != nil {
 		return 0, 0, fmt.Errorf("invalid seeds format, expected integers")
 	}
 	if start > end {
 		return 0, 0, fmt.Errorf("invalid seeds format, START must be <= END")
+	}
+	if uint64(end)-uint64(start) >= 1000000 {
+		return 0, 0, fmt.Errorf("seed range is too large (maximum 1000000 seeds)")
 	}
 	return start, end, nil
 }

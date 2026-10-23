@@ -87,6 +87,28 @@ func (c *FaultInjectionCoverageChecker) Check(runID string, st *store.Store) ([]
 		map[string]interface{}{"successful_injections": count, "required": c.MinimumSuccessfulInjections, "fault_types": injectedTypes})}, nil
 }
 
+// FaultExecutionChecker is independent of minimum coverage: one successful
+// injection must never conceal another failed injection or failed recovery.
+type FaultExecutionChecker struct{}
+
+func (c *FaultExecutionChecker) Name() string { return "fault_execution" }
+
+func (c *FaultExecutionChecker) Check(runID string, st *store.Store) ([]model.Violation, error) {
+	events, err := st.GetEvents(runID)
+	if err != nil {
+		return nil, err
+	}
+	var violations []model.Violation
+	for _, event := range events {
+		if event.Category == "Fault" && (event.Type == "FaultInjectionFailed" || event.Type == "FaultRecoveryFailed") {
+			violations = append(violations, coverageViolation(runID, c.Name(),
+				fmt.Sprintf("%s at %dms: %s", event.Type, event.TimeMs, event.PayloadJSON),
+				map[string]interface{}{"event_id": event.ID, "type": event.Type, "payload": event.PayloadJSON}))
+		}
+	}
+	return violations, nil
+}
+
 func coverageViolation(runID, checkerName, description string, evidence map[string]interface{}) model.Violation {
 	encoded, _ := json.Marshal(evidence)
 	return model.Violation{

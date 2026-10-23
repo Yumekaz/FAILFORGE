@@ -11,6 +11,28 @@ import (
 	"failforge/internal/node"
 )
 
+func TestDiskWriteLossRejectsEmptyFileNoOp(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.Config{System: config.SystemConfig{Nodes: config.NodesConfig{
+		Count: 1, Command: "sleep 10", DataDir: filepath.Join(dir, "data-{node_id}"),
+	}}}
+	nm := node.NewNodeManager(cfg, "empty-file", dir, func(int64, string, string, map[string]interface{}) {})
+	defer nm.StopAll()
+	if err := nm.StartNode(context.Background(), "node-1"); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := nm.GetDataDir("node-1")
+	if err := os.WriteFile(filepath.Join(data, "empty"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	err := (&DiskWriteLossFault{}).Inject(context.Background(), &FaultContext{
+		Manager: nm, Config: &config.FaultConfig{Type: "disk_write_loss", Params: map[string]interface{}{"node": "node-1"}},
+	})
+	if err == nil {
+		t.Fatal("zero-byte truncation was falsely confirmed as data loss")
+	}
+}
+
 func TestDiskWriteLossFault(t *testing.T) {
 	tempDir := t.TempDir()
 	cfg := &config.Config{

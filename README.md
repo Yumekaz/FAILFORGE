@@ -126,6 +126,27 @@ The framework does not automatically intercept arbitrary protocols or turn an un
 
 ## Verification
 
+Run a bounded first-party seed matrix with independent repetitions:
+
+```bash
+go build -o failforge ./cmd/failforge
+./failforge hardening --output-dir "$PWD/validation-runs/new-campaign" \
+  --profiles minidb,coordination --seeds 42..43 --repetitions 2 \
+  --max-runs 8 --max-runtime 10m --run-timeout 90s --keep-going
+```
+
+The output directory is single-use. Each attempt retains its command, seed,
+exit code, source fingerprints, confirmed faults, successful-operation counts,
+violations and checksummed artifacts. Source changes invalidate that attempt;
+freeze target revisions before running a release campaign. Repetitions are
+separate observations, not retries that replace failures. Without `--keep-going`,
+the matrix stops at its first non-passing attempt and records unstarted work.
+
+Timeouts, interrupted runs, missing coverage and failed fault injection/recovery
+are non-green, even if another fault succeeded. Storage thresholds are sampled
+stop conditions, not a filesystem quota; an inherited per-file limit and bounded
+cleanup add containment. Seeded schedules do not imply identical OS execution.
+
 ```bash
 go test ./...
 ```

@@ -22,6 +22,56 @@ func (s stubCampaignRunner) RunAndReport(context.Context) (*runner.RunResult, er
 	return s.result, s.err
 }
 
+func TestCampaignNonPassingStatusesNeverBecomeSuccessOrRetry(t *testing.T) {
+	for _, tc := range []struct {
+		name, status    string
+		initErr, runErr error
+		violations      int
+	}{
+		{name: "unknown", status: "UNKNOWN"},
+		{name: "crashed", status: "CRASHED"},
+		{name: "aborted", status: "ABORTED"},
+		{name: "initialization", initErr: errors.New("init failed")},
+		{name: "error with passed result", status: "PASSED", runErr: errors.New("history failed")},
+		{name: "violation with passed result", status: "PASSED", violations: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Chdir(t.TempDir())
+			original := newCampaignRunner
+			t.Cleanup(func() { newCampaignRunner = original })
+			calls := 0
+			newCampaignRunner = func(*config.Config, *int64, string) (campaignRunner, error) {
+				calls++
+				return stubCampaignRunner{result: &runner.RunResult{Status: tc.status, ViolationCount: tc.violations}, err: tc.runErr}, tc.initErr
+			}
+			res, err := RunCampaign(context.Background(), &config.Config{}, "test.yml", 1, 3, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if calls != 1 || res.Passed != 0 || !res.StoppedEarly {
+				t.Fatalf("false success or retry: calls=%d result=%+v", calls, res)
+			}
+		})
+	}
+}
+
+func TestCampaignDirectoriesAreNeverShared(t *testing.T) {
+	t.Chdir(t.TempDir())
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	a, err := RunCampaign(ctx, &config.Config{}, "test.yml", 1, 1, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := RunCampaign(ctx, &config.Config{}, "test.yml", 1, 1, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.OutputDir == b.OutputDir {
+		t.Fatal("campaign reused directory")
+	}
+}
+
 func TestRunCampaignRecordsCrashedSeedWhenRunnerReturnsNil(t *testing.T) {
 	t.Chdir(t.TempDir())
 	originalFactory := newCampaignRunner

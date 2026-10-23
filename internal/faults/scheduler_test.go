@@ -187,3 +187,70 @@ func TestSchedulerRecordsAttemptAndOnlyConfirmsSuccessfulInjection(t *testing.T)
 		})
 	}
 }
+
+type asyncRecoveryTestFault struct{}
+
+func (*asyncRecoveryTestFault) Type() string                       { return "async_recovery_test" }
+func (*asyncRecoveryTestFault) Validate(*config.FaultConfig) error { return nil }
+func (*asyncRecoveryTestFault) Inject(ctx context.Context, fctx *FaultContext) error {
+	fctx.launch(func() {
+		<-ctx.Done()
+		time.Sleep(20 * time.Millisecond)
+		fctx.LogEvent(1, "Fault", "FaultRecoveryFailed", `{"fault":"async_recovery_test","error":"recovery failed"}`)
+	})
+	return nil
+}
+
+func TestSchedulerStopWaitsForRecoveryAudit(t *testing.T) {
+	st, err := store.NewStore(filepath.Join(t.TempDir(), "history.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	confirmed := make(chan struct{}, 1)
+	onEvent := func(ms int64, category, kind, payload string) {
+		if err := st.CreateEvent(&model.Event{RunID: "run", TimeMs: ms, Category: category, Type: kind, PayloadJSON: payload}); err != nil {
+			t.Error(err)
+		}
+		if kind == "FaultInjected" {
+			confirmed <- struct{}{}
+		}
+	}
+	reg := NewRegistry()
+	reg.Register(&asyncRecoveryTestFault{})
+	cfg := &config.Config{Faults: config.FaultsConfig{Mode: "scripted", Schedule: []config.FaultConfig{{Type: "async_recovery_test"}}}}
+	s := NewScheduler(cfg, "run", 1, t.TempDir(), nil, nil, st, onEvent, reg)
+	if err := s.Start(context.Background(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-confirmed:
+	case <-time.After(time.Second):
+		t.Fatal("no fault confirmation")
+	}
+	s.Stop()
+	events, err := st.GetEvents("run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, event := range events {
+		if event.Type == "FaultRecoveryFailed" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("Stop returned before recovery audit was persisted")
+	}
+}
+
+func TestRandomScheduleShortWindowsNeverPanic(t *testing.T) {
+	for _, maximum := range []int{0, -1, 101, 1000} {
+		cfg := &config.Config{Time: config.TimeConfig{DurationMs: 1}, Faults: config.FaultsConfig{Profile: map[string]interface{}{"max_faults": maximum, "kill_node": 1}}}
+		s := NewScheduler(cfg, "short", 42, "", nil, nil, nil, nil, nil)
+		generated := s.generateRandomSchedule()
+		if maximum <= 0 && len(generated) != 0 {
+			t.Fatal("nonpositive maximum generated faults")
+		}
+	}
+}

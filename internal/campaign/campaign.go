@@ -27,6 +27,7 @@ type SeedResult struct {
 	Violations     []ViolationSummary `json:"violations"`
 	OutputDir      string             `json:"output_dir"`
 	Elapsed        time.Duration      `json:"elapsed"`
+	Error          string             `json:"error,omitempty"`
 }
 
 type CampaignResult struct {
@@ -55,12 +56,17 @@ var newCampaignRunner = func(cfg *config.Config, seed *int64, outputDir string) 
 
 func RunCampaign(ctx context.Context, cfg *config.Config, configPath string, seedStart, seedEnd int64, stopOnFailure bool) (*CampaignResult, error) {
 	startTime := time.Now()
+	if seedStart > seedEnd || uint64(seedEnd)-uint64(seedStart) >= 1000000 {
+		return nil, fmt.Errorf("invalid or excessive seed range")
+	}
 
 	// 1. Create a campaign output directory
-	timestamp := time.Now().Format("20060102-150405")
-	campaignDir := filepath.Join("runs", fmt.Sprintf("campaign-%s", timestamp))
-	if err := os.MkdirAll(campaignDir, 0755); err != nil {
+	if err := os.MkdirAll("runs", 0755); err != nil {
 		return nil, fmt.Errorf("failed to create campaign output directory: %w", err)
+	}
+	campaignDir, err := os.MkdirTemp("runs", "campaign-"+time.Now().Format("20060102-150405")+"-")
+	if err != nil {
+		return nil, err
 	}
 
 	res := &CampaignResult{
@@ -75,7 +81,8 @@ func RunCampaign(ctx context.Context, cfg *config.Config, configPath string, see
 
 	// 2. Sequentially execute each seed in the range
 campaignLoop:
-	for seed := seedStart; seed <= seedEnd; seed++ {
+	for index := 0; index < res.TotalSeeds; index++ {
+		seed := seedStart + int64(index)
 		select {
 		case <-ctx.Done():
 			res.StoppedEarly = true
@@ -98,8 +105,13 @@ campaignLoop:
 				Status:    "CRASHED",
 				OutputDir: seedOutputDir,
 				Elapsed:   time.Since(seedStartTime),
+				Error:     err.Error(),
 			})
 			res.Crashed++
+			if stopOnFailure {
+				res.StoppedEarly = true
+				break campaignLoop
+			}
 			continue
 		}
 
@@ -120,6 +132,15 @@ campaignLoop:
 			// A nil result cannot provide a run ID or status. Keep the seed
 			// represented in the campaign as a clean crash instead of panicking.
 			status = "CRASHED"
+		}
+		if runErr != nil && status == "PASSED" {
+			status = "CRASHED"
+		}
+		if status != "PASSED" && status != "FAILED" && status != "CRASHED" && status != "ABORTED" {
+			status = "CRASHED"
+		}
+		if status == "PASSED" && violationCount > 0 {
+			status = "FAILED"
 		}
 
 		// Query violations details if there were any
@@ -150,6 +171,9 @@ campaignLoop:
 			OutputDir:      seedOutputDir,
 			Elapsed:        elapsed,
 		}
+		if runErr != nil {
+			seedRes.Error = runErr.Error()
+		}
 
 		res.SeedResults = append(res.SeedResults, seedRes)
 
@@ -164,10 +188,10 @@ campaignLoop:
 		case "ABORTED":
 			res.Aborted++
 		default:
-			res.Passed++
+			res.Crashed++
 		}
 
-		if violationCount > 0 && stopOnFailure {
+		if status != "PASSED" && stopOnFailure {
 			res.StoppedEarly = true
 			fmt.Printf("Stop on failure enabled. Stopping campaign after failure in seed %d.\n", seed)
 			break campaignLoop

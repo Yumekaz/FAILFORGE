@@ -23,7 +23,7 @@ func GenerateCampaignReport(res *CampaignResult) error {
 	sb.WriteString(fmt.Sprintf("- **Crashed**: %d\n", res.Crashed))
 	sb.WriteString(fmt.Sprintf("- **Aborted**: %d\n", res.Aborted))
 	if res.StoppedEarly {
-		sb.WriteString("- **Stopped Early**: Yes (due to stop-on-failure)\n")
+		sb.WriteString("- **Stopped Early**: Yes (failure or interruption; not all seeds completed)\n")
 	} else {
 		sb.WriteString("- **Stopped Early**: No\n")
 	}
@@ -31,7 +31,7 @@ func GenerateCampaignReport(res *CampaignResult) error {
 
 	sb.WriteString("## Failure Groups\n\n")
 	if len(res.FailureGroups) == 0 {
-		sb.WriteString("No failures/invariant violations detected during this campaign!\n\n")
+		sb.WriteString("No checker failure groups recorded. This does not establish that crashed, interrupted or unstarted seeds passed.\n\n")
 	} else {
 		// Sort failure groups by checker name for consistency
 		keys := make([]string, 0, len(res.FailureGroups))

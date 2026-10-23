@@ -27,4 +27,14 @@ type FaultContext struct {
 	Seed      int64
 	LogEvent  func(timeMs int64, category, eventType, payloadJSON string)
 	StartTime time.Time
+	// Launch registers asynchronous recovery with the scheduler's shutdown.
+	Launch func(func())
+}
+
+func (fctx *FaultContext) launch(fn func()) {
+	if fctx.Launch != nil {
+		fctx.Launch(fn)
+	} else {
+		go fn()
+	}
 }

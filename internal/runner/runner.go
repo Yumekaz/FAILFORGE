@@ -45,7 +45,7 @@ func NewRunner(cfg *config.Config, overrideSeed *int64, overrideOutputDir string
 	if overrideSeed != nil {
 		seed = *overrideSeed
 	}
-	if seed == 0 {
+	if seed == 0 && overrideSeed == nil {
 		seed = time.Now().UnixNano() % 1000000
 	}
 
@@ -238,14 +238,22 @@ func (r *Runner) Run(ctx context.Context) error {
 	select {
 	case err := <-proxyErrChan:
 		log.Printf("[Runner] Proxy crashed: %v\n", err)
+		wlCancel()
+		<-wlDone
 		r.cleanup(runRecord, "CRASHED")
 		return err
 	case <-wlDone:
 		log.Println("[Runner] Workload simulation complete.")
 	case <-ctx.Done():
 		log.Println("[Runner] Context cancelled. Aborting...")
+		wlCancel()
+		<-wlDone
 		r.cleanup(runRecord, "ABORTED")
 		return ctx.Err()
+	}
+	if err := ctx.Err(); err != nil {
+		r.cleanup(runRecord, "ABORTED")
+		return err
 	}
 
 	// 6. Cleanup & Shutdown
@@ -270,6 +278,13 @@ func (r *Runner) cleanup(runRecord *model.Run, finalStatus string) {
 	var violationsFound bool
 	if finalStatus == "PASSED" {
 		log.Println("[Runner] Running consistency and correctness invariant checkers...")
+		audit := &checkers.FaultExecutionChecker{}
+		violations, err := audit.Check(r.runID, r.store)
+		if err != nil {
+			r.recordHistoryError(fmt.Errorf("fault audit: %w", err))
+		} else if r.recordCheckerViolations(runRecord, audit.Name(), violations) {
+			violationsFound = true
+		}
 		for _, chkCfg := range r.cfg.Checkers {
 			chk, err := checkers.GetChecker(chkCfg.Name)
 			if err != nil {
@@ -361,6 +376,7 @@ func (r *Runner) recordCheckerViolations(runRecord *model.Run, checkerName strin
 		}
 		if err := r.store.CreateViolation(&violationRecord); err != nil {
 			log.Printf("[Runner] Failed to save violation to DB: %v\n", err)
+			r.recordHistoryError(err)
 		}
 		payloadMap := map[string]interface{}{
 			"checker_name":  violationRecord.CheckerName,

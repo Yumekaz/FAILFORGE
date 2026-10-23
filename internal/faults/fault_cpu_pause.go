@@ -38,7 +38,7 @@ func (f *CpuPauseFault) Inject(ctx context.Context, fctx *FaultContext) error {
 
 	// Resume later without blocking the scheduler loop. Recovery failures are
 	// explicitly recorded rather than being silently ignored.
-	go func() {
+	fctx.launch(func() {
 		select {
 		case <-ctx.Done():
 		case <-time.After(time.Duration(durationMs) * time.Millisecond):
@@ -49,7 +49,7 @@ func (f *CpuPauseFault) Inject(ctx context.Context, fctx *FaultContext) error {
 			return
 		}
 		emitFaultOutcome(fctx, "FaultCompleted", node, nil)
-	}()
+	})
 
 	return nil
 }

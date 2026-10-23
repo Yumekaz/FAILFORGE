@@ -26,6 +26,9 @@ func (f *DiskWriteLossFault) Validate(cfg *config.FaultConfig) error {
 func (f *DiskWriteLossFault) Inject(ctx context.Context, fctx *FaultContext) error {
 	node := fctx.Config.GetParamString("node", "")
 	lossWindowS := fctx.Config.GetParamInt("loss_window_s", 2)
+	if lossWindowS <= 0 {
+		return fmt.Errorf("disk_write_loss: loss_window_s must be positive")
+	}
 
 	// 1. Kill node
 	if err := fctx.Manager.KillNode(node); err != nil {
@@ -50,7 +53,8 @@ func (f *DiskWriteLossFault) Inject(ctx context.Context, fctx *FaultContext) err
 		if walkErr != nil {
 			return walkErr
 		}
-		if info.IsDir() || now.Sub(info.ModTime()) > window {
+		// Do not count zero-byte no-ops or follow links outside disposable data.
+		if !info.Mode().IsRegular() || info.Size() == 0 || now.Sub(info.ModTime()) > window {
 			return nil
 		}
 		if err := os.Truncate(path, 0); err != nil {

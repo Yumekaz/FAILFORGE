@@ -22,6 +22,8 @@ jobs:
           go test ./... -count=1 -timeout 12m -json | tee verification/unit.jsonl
       - name: Build CLI
         run: go build -o verification/failforge ./cmd/failforge
+      - name: Required framework race detector
+        run: CGO_ENABLED=1 go test -race ./... -count=1 -timeout 12m
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -73,6 +75,12 @@ jobs:
           for seed in 42 43; do
             verification/failforge run failforge_coordination.yml --seed "$seed" > "verification/coordination-$seed.log" 2>&1
           done
+      - name: Bounded independent-repetition runner acceptance
+        working-directory: FAILFORGE
+        run: |
+          verification/failforge hardening --output-dir "$PWD/validation-runs/ci-hardening" \
+            --profiles minidb,coordination --seeds 42..43 --repetitions 2 \
+            --max-runs 8 --max-runtime 10m --run-timeout 90s --keep-going
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -80,3 +88,4 @@ jobs:
           path: |
             FAILFORGE/verification/*.log
             FAILFORGE/runs/
+            FAILFORGE/validation-runs/ci-hardening/

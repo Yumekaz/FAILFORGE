@@ -191,6 +191,10 @@ func (s *Scheduler) injectFault(ctx context.Context, f config.FaultConfig) {
 		Seed:      s.seed,
 		LogEvent:  s.onEvent,
 		StartTime: s.startTime,
+		Launch: func(fn func()) {
+			s.wg.Add(1)
+			go func() { defer s.wg.Done(); fn() }()
+		},
 	}
 
 	fault, ok := s.registry.Get(f.Type)
@@ -320,7 +324,13 @@ func (s *Scheduler) generateRandomSchedule() []config.FaultConfig {
 		startBuffer = 0
 	}
 
+	if maxFaults <= 0 {
+		return nil
+	}
 	segment := usableDuration / int64(maxFaults)
+	if segment < 1 {
+		segment = 1
+	}
 	var generated []config.FaultConfig
 	nodeCount := s.cfg.System.Nodes.Count
 	if nodeCount <= 0 {

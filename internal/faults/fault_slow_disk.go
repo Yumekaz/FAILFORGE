@@ -37,7 +37,7 @@ func (f *SlowDiskFault) Inject(ctx context.Context, fctx *FaultContext) error {
 		return fmt.Errorf("slow_disk: %w", err)
 	}
 
-	go func() {
+	fctx.launch(func() {
 		endTime := time.Now().Add(time.Duration(durationMs) * time.Millisecond)
 		paused := true
 		completed := false
@@ -90,7 +90,7 @@ func (f *SlowDiskFault) Inject(ctx context.Context, fctx *FaultContext) error {
 			}
 			paused = true
 		}
-	}()
+	})
 
 	return nil
 }
