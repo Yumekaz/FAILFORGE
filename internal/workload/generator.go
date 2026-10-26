@@ -43,6 +43,55 @@ type OpWeight struct {
 	weight int
 }
 
+// coordinationLeaseHints belongs to one sequential client worker. It remembers
+// successful acquires only to choose useful UNLOCK keys, not to infer success,
+// renew leases, or replace requests. The server remains authoritative, including
+// when a remembered lease has expired or a fault made its outcome uncertain.
+type coordinationLeaseHints []string
+
+func (h coordinationLeaseHints) unlockKey(selected string) string {
+	for _, key := range h {
+		if key == selected {
+			return selected
+		}
+	}
+	if len(h) > 0 {
+		return h[0] // Acquisition order, without another random draw or map iteration.
+	}
+	return selected // Keep negative probes when this client knows no owned lease.
+}
+
+func (h *coordinationLeaseHints) observe(op, key, status, outputJSON string) {
+	op = strings.ToLower(op)
+	if op == "lock" && status == "ok" {
+		for _, owned := range *h {
+			if owned == key {
+				return // Repeated successful acquires are not new leases or renewals.
+			}
+		}
+		*h = append(*h, key)
+		return
+	}
+	if op != "unlock" {
+		return
+	}
+	if status != "ok" {
+		var response struct {
+			StatusCode int `json:"status_code"`
+		}
+		if json.Unmarshal([]byte(outputJSON), &response) != nil ||
+			(response.StatusCode != http.StatusForbidden && response.StatusCode != http.StatusNotFound) {
+			return // An uncertain failure does not prove ownership was lost.
+		}
+	}
+	for i, owned := range *h {
+		if owned == key {
+			*h = append((*h)[:i], (*h)[i+1:]...)
+			return
+		}
+	}
+}
+
 func NewGenerator(cfg *config.Config, runID string, seed int64, store *store.Store, onEvent func(timeMs int64, category, eventType, payloadJSON string)) *Generator {
 	return &Generator{
 		cfg:      cfg,
@@ -122,6 +171,8 @@ func (g *Generator) worker(ctx context.Context, wg *sync.WaitGroup, clientID str
 
 	r := rand.New(rand.NewSource(seed))
 	opCounter := 0
+	var leaseHints coordinationLeaseHints
+	coordination := g.cfg.Workload.Type == "coordination-service"
 	keys := g.cfg.Workload.Keys
 	if len(keys) == 0 {
 		keys = []string{"x"}
@@ -154,6 +205,9 @@ func (g *Generator) worker(ctx context.Context, wg *sync.WaitGroup, clientID str
 
 			// Select key, value, and target node deterministically
 			key := keys[r.Intn(len(keys))]
+			if coordination && strings.EqualFold(selectedOp, "unlock") {
+				key = leaseHints.unlockKey(key)
+			}
 			// Consume the same seeded choice but make each write identifiable.
 			// Reused values made stale-read evidence point to the wrong write.
 			val := fmt.Sprintf("%s-%d", opID, r.Intn(100))
@@ -169,6 +223,9 @@ func (g *Generator) worker(ctx context.Context, wg *sync.WaitGroup, clientID str
 			// Execute request
 			opStatus, inputJSON, outputJSON := g.executeRequest(ctx, clientID, targetNode, selectedOp, key, val)
 			endMs := time.Since(g.startTime).Milliseconds()
+			if coordination {
+				leaseHints.observe(selectedOp, key, opStatus, outputJSON)
+			}
 
 			// Log completed operation record to DB
 			if err := g.store.CreateOperation(&model.Operation{
