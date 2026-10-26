@@ -44,10 +44,16 @@ func TestSchedulerDeterministicGeneration(t *testing.T) {
 	}
 
 	s1 := NewScheduler(cfg, "run-1", 42, "", nil, nil, nil, nil, nil)
-	sched1 := s1.generateRandomSchedule()
+	sched1, err := s1.generateRandomSchedule()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	s2 := NewScheduler(cfg, "run-2", 42, "", nil, nil, nil, nil, nil)
-	sched2 := s2.generateRandomSchedule()
+	sched2, err := s2.generateRandomSchedule()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// 1. Assert identical seeds yield identical schedules
 	if len(sched1) != len(sched2) {
@@ -62,7 +68,10 @@ func TestSchedulerDeterministicGeneration(t *testing.T) {
 
 	// 2. Assert different seeds yield different schedules
 	s3 := NewScheduler(cfg, "run-3", 43, "", nil, nil, nil, nil, nil)
-	sched3 := s3.generateRandomSchedule()
+	sched3, err := s3.generateRandomSchedule()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	different := false
 	if len(sched1) != len(sched3) {
@@ -104,7 +113,10 @@ func TestSchedulerNestedWeights(t *testing.T) {
 	}
 
 	s1 := NewScheduler(cfg, "run-1", 42, "", nil, nil, nil, nil, nil)
-	sched1 := s1.generateRandomSchedule()
+	sched1, err := s1.generateRandomSchedule()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if len(sched1) == 0 {
 		t.Errorf("expected schedule to be generated, got 0 items")
@@ -248,7 +260,7 @@ func TestRandomScheduleShortWindowsNeverPanic(t *testing.T) {
 	for _, maximum := range []int{0, -1, 101, 1000} {
 		cfg := &config.Config{Time: config.TimeConfig{DurationMs: 1}, Faults: config.FaultsConfig{Profile: map[string]interface{}{"max_faults": maximum, "kill_node": 1}}}
 		s := NewScheduler(cfg, "short", 42, "", nil, nil, nil, nil, nil)
-		generated := s.generateRandomSchedule()
+		generated, _ := s.generateRandomSchedule()
 		if maximum <= 0 && len(generated) != 0 {
 			t.Fatal("nonpositive maximum generated faults")
 		}

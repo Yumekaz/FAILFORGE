@@ -70,7 +70,11 @@ func (s *Scheduler) Start(ctx context.Context, startTime time.Time) error {
 	if strings.ToLower(s.cfg.Faults.Mode) == "scripted" {
 		s.schedule = append([]config.FaultConfig(nil), s.cfg.Faults.Schedule...)
 	} else if strings.ToLower(s.cfg.Faults.Mode) == "seeded_random" {
-		s.schedule = s.generateRandomSchedule()
+		var err error
+		s.schedule, err = s.generateRandomSchedule()
+		if err != nil {
+			return fmt.Errorf("seeded_random schedule (seed %d): %w", s.seed, err)
+		}
 		// Save generated faults schedule to runs/<run_id>/faults.json
 		faultsJSON, err := json.MarshalIndent(s.schedule, "", "  ")
 		if err == nil {
@@ -228,7 +232,7 @@ func (s *Scheduler) injectFault(ctx context.Context, f config.FaultConfig) {
 	})
 }
 
-func (s *Scheduler) generateRandomSchedule() []config.FaultConfig {
+func (s *Scheduler) generateRandomSchedule() ([]config.FaultConfig, error) {
 	r := rand.New(rand.NewSource(s.seed))
 
 	maxFaults := 3
@@ -238,6 +242,9 @@ func (s *Scheduler) generateRandomSchedule() []config.FaultConfig {
 		} else if vf, ok := val.(float64); ok {
 			maxFaults = int(vf)
 		}
+	}
+	if maxFaults <= 0 {
+		return nil, nil
 	}
 
 	var keys []string
@@ -313,31 +320,40 @@ func (s *Scheduler) generateRandomSchedule() []config.FaultConfig {
 	}
 	durationMs -= int64(s.cfg.Faults.StartAfterMs)
 	if durationMs <= 0 {
-		return nil
+		return nil, fmt.Errorf("profile requests %d faults but start_after_ms leaves no fault window", maxFaults)
 	}
 
 	startBuffer := int64(500)
 	endBuffer := int64(1000)
 	usableDuration := durationMs - startBuffer - endBuffer
 	if usableDuration <= 0 {
-		usableDuration = 100
+		usableDuration = durationMs
 		startBuffer = 0
 	}
 
-	if maxFaults <= 0 {
-		return nil
+	if int64(maxFaults) > usableDuration {
+		return nil, fmt.Errorf("profile requests %d faults but only %dms are available for distinct attempts", maxFaults, usableDuration)
 	}
 	segment := usableDuration / int64(maxFaults)
-	if segment < 1 {
-		segment = 1
-	}
 	var generated []config.FaultConfig
 	nodeCount := s.cfg.System.Nodes.Count
 	if nodeCount <= 0 {
-		nodeCount = 3
+		return nil, fmt.Errorf("profile requests %d faults but has no configured nodes", maxFaults)
 	}
 
 	activePartitions := false
+	// Select from a finite list rather than repeatedly drawing until different.
+	// Callers must supply a source with at least one possible destination.
+	randomPeer := func(from string) string {
+		var peers []string
+		for n := 1; n <= nodeCount; n++ {
+			id := fmt.Sprintf("node-%d", n)
+			if id != from {
+				peers = append(peers, id)
+			}
+		}
+		return peers[r.Intn(len(peers))]
+	}
 
 	for i := 0; i < maxFaults; i++ {
 		segmentStart := startBuffer + int64(i)*segment
@@ -365,6 +381,9 @@ func (s *Scheduler) generateRandomSchedule() []config.FaultConfig {
 		case "kill_node", "restart_node":
 			fault.Node = randomNode
 		case "partition":
+			if nodeCount < 2 {
+				return nil, fmt.Errorf("profile attempt %d (%s) requires at least two nodes", i+1, selectedType)
+			}
 			var g1, g2 []string
 			for n := 1; n <= nodeCount; n++ {
 				nodeID := fmt.Sprintf("node-%d", n)
@@ -379,9 +398,6 @@ func (s *Scheduler) generateRandomSchedule() []config.FaultConfig {
 				g2 = g2[1:]
 			}
 			if len(g2) == 0 {
-				if len(g1) < 2 {
-					continue
-				}
 				g2 = append(g2, g1[len(g1)-1])
 				g1 = g1[:len(g1)-1]
 			}
@@ -397,11 +413,11 @@ func (s *Scheduler) generateRandomSchedule() []config.FaultConfig {
 			fault.From = "client"
 			fault.To = randomNode
 		case "asymmetric_partition":
-			nodeSrc := fmt.Sprintf("node-%d", r.Intn(nodeCount)+1)
-			nodeDest := fmt.Sprintf("node-%d", r.Intn(nodeCount)+1)
-			for nodeSrc == nodeDest {
-				nodeDest = fmt.Sprintf("node-%d", r.Intn(nodeCount)+1)
+			if nodeCount < 2 {
+				return nil, fmt.Errorf("profile attempt %d (%s) requires at least two nodes", i+1, selectedType)
 			}
+			nodeSrc := fmt.Sprintf("node-%d", r.Intn(nodeCount)+1)
+			nodeDest := randomPeer(nodeSrc)
 			fault.Params = map[string]interface{}{
 				"from": nodeSrc,
 				"to":   nodeDest,
@@ -409,26 +425,20 @@ func (s *Scheduler) generateRandomSchedule() []config.FaultConfig {
 			activePartitions = true
 		case "duplicate_messages":
 			nodeSrc := "client"
-			if r.Intn(2) == 0 {
+			if r.Intn(2) == 0 && nodeCount > 1 {
 				nodeSrc = fmt.Sprintf("node-%d", r.Intn(nodeCount)+1)
 			}
-			nodeDest := fmt.Sprintf("node-%d", r.Intn(nodeCount)+1)
-			for nodeSrc == nodeDest {
-				nodeDest = fmt.Sprintf("node-%d", r.Intn(nodeCount)+1)
-			}
+			nodeDest := randomPeer(nodeSrc)
 			fault.Params = map[string]interface{}{
 				"from": nodeSrc,
 				"to":   nodeDest,
 			}
 		case "corrupt_messages":
 			nodeSrc := "client"
-			if r.Intn(2) == 0 {
+			if r.Intn(2) == 0 && nodeCount > 1 {
 				nodeSrc = fmt.Sprintf("node-%d", r.Intn(nodeCount)+1)
 			}
-			nodeDest := fmt.Sprintf("node-%d", r.Intn(nodeCount)+1)
-			for nodeSrc == nodeDest {
-				nodeDest = fmt.Sprintf("node-%d", r.Intn(nodeCount)+1)
-			}
+			nodeDest := randomPeer(nodeSrc)
 			fault.Params = map[string]interface{}{
 				"from":            nodeSrc,
 				"to":              nodeDest,
@@ -475,11 +485,95 @@ func (s *Scheduler) generateRandomSchedule() []config.FaultConfig {
 	}
 
 	if activePartitions {
+		healAtMs := durationMs - 500
+		if lastAtMs := generated[len(generated)-1].AtMs; healAtMs <= lastAtMs {
+			healAtMs = lastAtMs + 1
+		}
+		if healAtMs >= durationMs {
+			return nil, fmt.Errorf("profile leaves no time to heal its final partition within the fault window")
+		}
 		generated = append(generated, config.FaultConfig{
-			AtMs: durationMs - 500,
+			AtMs: healAtMs,
 			Type: "heal",
 		})
 	}
 
-	return generated
+	// Keep every sampled type, time, and attempt. Resolve only process targets
+	// against earlier planned effects, without rerolling the seed or replacing
+	// an impossible attempt with a different fault. Scripted/replay bypass this.
+	if err := assignGeneratedProcessTargets(generated, nodeCount); err != nil {
+		return nil, err
+	}
+	return generated, nil
+}
+
+func assignGeneratedProcessTargets(schedule []config.FaultConfig, nodeCount int) error {
+	killed := make(map[string]bool)
+	busyUntilMs := make(map[string]int64)
+	for i := range schedule {
+		f := &schedule[i]
+		var preferred string
+		switch f.Type {
+		case "kill_node", "restart_node":
+			preferred = f.Node
+		case "cpu_pause", "slow_disk", "disk_write_loss", "partial_persistence", "stale_snapshot_restart":
+			preferred = f.GetParamString("node", "")
+		default:
+			continue
+		}
+
+		var running, stopped []string
+		for n := 1; n <= nodeCount; n++ {
+			id := fmt.Sprintf("node-%d", n)
+			// Do not interrupt an asynchronous pause/stall and make its
+			// eventual resume fail, or attempt a second concurrent pause.
+			if busyUntilMs[id] > f.AtMs {
+				continue
+			}
+			if killed[id] {
+				stopped = append(stopped, id)
+			} else {
+				running = append(running, id)
+			}
+		}
+		eligible := running
+		// RestartNode also restarts a live process, but recover a planned
+		// killed node first when one exists.
+		if f.Type == "restart_node" && len(stopped) > 0 {
+			eligible = stopped
+		}
+		if len(eligible) == 0 {
+			return fmt.Errorf("profile cannot satisfy attempt %d (%s at %dms): no eligible process target among %d nodes after earlier planned faults", i+1, f.Type, f.AtMs, nodeCount)
+		}
+		target := eligible[0]
+		for _, id := range eligible {
+			if id == preferred {
+				target = id
+				break
+			}
+		}
+		if f.Type == "kill_node" || f.Type == "restart_node" {
+			f.Node = target
+		} else {
+			if f.Params == nil {
+				f.Params = make(map[string]interface{})
+			}
+			f.Params["node"] = target
+		}
+		switch f.Type {
+		case "kill_node":
+			killed[target] = true
+		case "restart_node":
+			killed[target] = false
+		case "cpu_pause":
+			busyUntilMs[target] = f.AtMs + int64(f.GetParamInt("duration_ms", 500))
+		case "slow_disk":
+			// A final stall may finish after duration_ms has elapsed.
+			busyUntilMs[target] = f.AtMs + int64(f.GetParamInt("duration_ms", 3000)) + int64(f.GetParamInt("stall_ms", 30))
+		}
+		// The persistence faults kill and restart synchronously; the target
+		// is running again before the next attempt is injected. Real runtime
+		// failures still follow the unchanged FaultInjectionFailed path.
+	}
+	return nil
 }
